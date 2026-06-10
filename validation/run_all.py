@@ -723,6 +723,40 @@ def run_full_validation(
     return full_results
 
 
+# Legacy 3-signal config (the suite's historical default before --config existed).
+LEGACY_CONFIG_KWARGS = {
+    "holding_days": 40,
+    "max_positions": 5,
+    "signal_types": ["volume", "quality", "low_vol"],
+    "initial_capital": 1_000_000,
+    "rebalance_frequency": 5,
+    "use_trailing_stop": True,
+    "trailing_stop_pct": 0.10,
+    "stop_loss_pct": 0.08,
+    "use_regime_filter": True,
+    "sector_limit": 0.35,
+    "regime_max_positions": None,
+    "bear_threshold": -0.05,
+}
+
+
+def resolve_config_kwargs(config_name: str) -> dict:
+    """Return run_backtest kwargs for the named config selection.
+
+    'long_term' = the shipped 6-signal C5 baseline (configs/long_term.py
+    LONG_TERM_CONFIG), the strategy the engine actually trades. 'legacy' =
+    the old 3-signal volume/quality/low_vol config.
+    """
+    if config_name == "legacy":
+        return dict(LEGACY_CONFIG_KWARGS)
+
+    from configs.long_term import LONG_TERM_CONFIG
+
+    kwargs = dict(LONG_TERM_CONFIG)
+    kwargs.setdefault("use_trailing_stop", True)
+    return kwargs
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="NEPSE Trading System — Production Readiness Validation"
@@ -731,12 +765,22 @@ def main():
     parser.add_argument("--end", default="2025-12-31", help="End date (YYYY-MM-DD)")
     parser.add_argument("--output", default="reports/validation", help="Output directory")
     parser.add_argument("--fast", action="store_true", help="Fast mode (fewer simulations)")
-    parser.add_argument("--holding-days", type=int, default=40, help="Holding period")
-    parser.add_argument("--max-positions", type=int, default=5, help="Max positions")
+    parser.add_argument(
+        "--config", default="long_term", choices=["long_term", "legacy"],
+        help=(
+            "Strategy config to validate. 'long_term' = the shipped 6-signal C5 "
+            "baseline (configs/long_term.py LONG_TERM_CONFIG, default); "
+            "'legacy' = the old 3-signal volume/quality/low_vol config"
+        ),
+    )
+    # Strategy-shaping overrides default to None so the chosen --config supplies
+    # the value; pass them explicitly to override the config.
+    parser.add_argument("--holding-days", type=int, default=None, help="Holding period (overrides --config)")
+    parser.add_argument("--max-positions", type=int, default=None, help="Max positions (overrides --config)")
     parser.add_argument(
         "--signals", nargs="+",
-        default=["volume", "quality", "low_vol"],
-        help="Signal types"
+        default=None,
+        help="Signal types (overrides --config)"
     )
     parser.add_argument(
         "--workers", type=int, default=1,
@@ -751,18 +795,32 @@ def main():
         help='Graduated regime position limits, e.g. "bull:5,neutral:4,bear:1"'
     )
     parser.add_argument(
-        "--bear-threshold", type=float, default=-0.05,
-        help="Bear regime threshold (default: -0.05, tighter: -0.03)"
+        "--bear-threshold", type=float, default=None,
+        help="Bear regime threshold (overrides --config; tighter: -0.03)"
     )
     args = parser.parse_args()
 
-    # Parse regime position limits
-    regime_max_positions = None
+    # Build the backtest kwargs from the selected config, then apply explicit
+    # CLI overrides on top. The default config is the shipped 6-signal C5
+    # baseline, so the suite validates the strategy the engine actually trades.
+    backtest_kwargs = resolve_config_kwargs(args.config)
+
+    if args.holding_days is not None:
+        backtest_kwargs["holding_days"] = args.holding_days
+    if args.max_positions is not None:
+        backtest_kwargs["max_positions"] = args.max_positions
+    if args.signals is not None:
+        backtest_kwargs["signal_types"] = args.signals
+    if args.bear_threshold is not None:
+        backtest_kwargs["bear_threshold"] = args.bear_threshold
+
+    # Parse regime position limits (overrides the config when supplied)
     if args.regime_positions:
         regime_max_positions = {}
         for pair in args.regime_positions.split(","):
             regime, count = pair.strip().split(":")
             regime_max_positions[regime.strip()] = int(count.strip())
+        backtest_kwargs["regime_max_positions"] = regime_max_positions
 
     results = run_full_validation(
         start_date=args.start,
@@ -771,18 +829,7 @@ def main():
         fast_mode=args.fast,
         max_workers=args.workers,
         fast_baseline=args.fast_baseline,
-        holding_days=args.holding_days,
-        max_positions=args.max_positions,
-        signal_types=args.signals,
-        initial_capital=1_000_000,
-        rebalance_frequency=5,
-        use_trailing_stop=True,
-        trailing_stop_pct=0.10,
-        stop_loss_pct=0.08,
-        use_regime_filter=True,
-        sector_limit=0.35,
-        regime_max_positions=regime_max_positions,
-        bear_threshold=args.bear_threshold,
+        **backtest_kwargs,
     )
 
     sys.exit(0 if results["go_nogo"] == "GO" else 1)
