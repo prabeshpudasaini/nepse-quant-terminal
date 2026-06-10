@@ -34,14 +34,36 @@ from backend.agents.runtime_config import (
 )
 from backend.quant_pro.nepse_calendar import current_nepal_datetime, get_market_schedule, market_session_phase
 from backend.quant_pro.control_plane.models import AgentDecision
-from backend.quant_pro.nepalosint_client import (
-    consolidated_stories,
-    consolidated_stories_history,
-    resolve_osint_base_url,
-    semantic_story_search,
-    symbol_intelligence,
-    unified_search,
-)
+# OSINT enrichment is OPTIONAL in the public build. If the self-hosted OSINT
+# client is absent or not configured, the analyst runs without it (no external
+# calls, neutral OSINT bias) rather than failing to import.
+try:
+    from backend.quant_pro.nepalosint_client import (
+        consolidated_stories,
+        consolidated_stories_history,
+        resolve_osint_base_url,
+        semantic_story_search,
+        symbol_intelligence,
+        unified_search,
+    )
+except Exception:  # pragma: no cover - optional dependency
+    def resolve_osint_base_url(*_a, **_k) -> str:
+        return ""
+
+    def consolidated_stories(*_a, **_k):
+        return []
+
+    def consolidated_stories_history(*_a, **_k):
+        return []
+
+    def semantic_story_search(*_a, **_k):
+        return []
+
+    def symbol_intelligence(*_a, **_k):
+        return {}
+
+    def unified_search(*_a, **_k):
+        return {}
 from backend.quant_pro.paths import ensure_dir, get_project_root, get_runtime_dir, migrate_legacy_path
 from backend.quant_pro.signal_ranking import canonicalize_signal_symbol
 from backend.trading import strategy_registry

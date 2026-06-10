@@ -2470,9 +2470,12 @@ class LiveTrader:
         self.peak_nav: float = self.capital
         self.consecutive_losses: int = 0
 
-        # Telegram
+        # Telegram (optional; live-path only — absent in the paper-only public build)
         if not self.no_telegram:
-            from backend.quant_pro.telegram_alerts import send_alert  # noqa: F401
+            try:
+                from backend.quant_pro.telegram_alerts import send_alert  # noqa: F401
+            except Exception:
+                self.no_telegram = True
 
         if self.tms_monitor_enabled:
             try:

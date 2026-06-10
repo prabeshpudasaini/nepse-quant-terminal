@@ -26,7 +26,14 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from backend.quant_pro.database import get_db_path, save_to_db
+from backend.quant_pro.database import (
+    get_db_path,
+    get_overlap_start_date,
+    list_pending_resyncs,
+    register_pending_resync,
+    save_to_db,
+)
+from backend.quant_pro.data_io import resync_full_history
 from backend.quant_pro.institutional import (
     INGESTION_RUN_STATUS,
     INGESTION_SYMBOL_STATUS,
@@ -264,7 +271,16 @@ def fetch_symbol_history(
     if latest_before is None:
         start_dt = datetime.now() - timedelta(days=history_days)
     else:
-        start_dt = pd.Timestamp(latest_before).to_pydatetime() - timedelta(days=backfill_days)
+        # Overlap the last N stored bars so a vendor re-base is detectable; keep
+        # --backfill-days as a calendar floor for back-compat. Use whichever
+        # window reaches further back.
+        backfill_floor = pd.Timestamp(latest_before).to_pydatetime() - timedelta(days=backfill_days)
+        overlap_start = get_overlap_start_date(symbol, 5)
+        if overlap_start is not None:
+            overlap_dt = pd.Timestamp(overlap_start).to_pydatetime()
+            start_dt = min(backfill_floor, overlap_dt)
+        else:
+            start_dt = backfill_floor
     start_ts = int(start_dt.timestamp())
     df = fetch_ohlcv_chunk(symbol, start_ts=start_ts, end_ts=now_ts)
     if df is None or df.empty:
@@ -298,6 +314,7 @@ def execute_ingestion(
     max_staleness_days: int,
     sleep_ms: int,
     strict: bool,
+    max_full_resyncs: int = 25,
 ) -> int:
     signal.signal(signal.SIGINT, _handle_shutdown)
     signal.signal(signal.SIGTERM, _handle_shutdown)
@@ -320,6 +337,22 @@ def execute_ingestion(
     succeeded = 0
     failed = 0
     rows_fetched_total = 0
+    resyncs_done = 0
+
+    # Drain symbols queued for full re-sync by a prior run (re-based but not yet
+    # rewritten). These count against the same cap as in-loop detections.
+    universe = set(symbols)
+    for pending in list_pending_resyncs():
+        if pending not in universe:
+            continue
+        if resyncs_done >= max_full_resyncs:
+            break
+        try:
+            if resync_full_history(pending):
+                resyncs_done += 1
+                print(f"[ingestion] drained pending re-sync for {pending}")
+        except Exception as exc:  # isolate drain failures
+            print(f"[ingestion] pending re-sync failed for {pending}: {exc}")
 
     for idx, symbol in enumerate(symbols, start=1):
         latest_symbol_before = get_symbol_latest_date(conn, symbol)
@@ -334,12 +367,52 @@ def execute_ingestion(
             rows_fetched = int(len(df))
             rows_fetched_total += rows_fetched
 
+            rebase_pending = False
             if rows_fetched > 0:
-                save_to_db(df, symbol)
+                # New symbols: full fetch in log mode. Existing symbols: abort
+                # mode so a half-spliced series is never persisted.
+                if latest_symbol_before is None:
+                    save_to_db(df, symbol, on_rebase="log")
+                else:
+                    result = save_to_db(df, symbol, on_rebase="abort")
+                    if result.rebase_detected:
+                        if resyncs_done < max_full_resyncs and resync_full_history(symbol):
+                            resyncs_done += 1
+                            rows_fetched_total += get_symbol_row_count(conn, symbol)
+                        else:
+                            register_pending_resync(symbol)
+                            rebase_pending = True
 
             rows_after = get_symbol_row_count(conn, symbol)
             latest_symbol_after = get_symbol_latest_date(conn, symbol)
             rows_added = max(rows_after - rows_before, 0)
+
+            if rebase_pending:
+                failed += 1
+                save_symbol_result(
+                    conn,
+                    run_id,
+                    SymbolResult(
+                        symbol=symbol,
+                        status="FAILED",
+                        rows_fetched=rows_fetched,
+                        rows_added=rows_added,
+                        latest_before=latest_symbol_before,
+                        latest_after=latest_symbol_after,
+                        error="vendor_rebase_detected_resync_pending",
+                    ),
+                )
+                print(
+                    f"[{idx:04d}/{len(symbols):04d}] {symbol:<12} status=FAILED  "
+                    f"error=vendor_rebase_detected_resync_pending"
+                )
+                if sleep_ms > 0:
+                    time.sleep(sleep_ms / 1000.0)
+                if _shutdown_requested:
+                    print(f"[ingestion] Graceful shutdown after {idx}/{len(symbols)} symbols")
+                    status = "PARTIAL"
+                    break
+                continue
 
             status = "SUCCESS" if rows_fetched > 0 else "NO_DATA"
             save_symbol_result(
@@ -442,6 +515,12 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--backfill-days", type=int, default=5, help="Overlap window for existing symbols")
     parser.add_argument("--max-staleness-days", type=int, default=7, help="Freshness SLA")
     parser.add_argument("--sleep-ms", type=int, default=0, help="Optional sleep between symbols")
+    parser.add_argument(
+        "--max-full-resyncs",
+        type=int,
+        default=25,
+        help="Max vendor-rebase full-history re-fetches per run (overflow queued for retry)",
+    )
     parser.add_argument("--strict", action="store_true", help="Fail on non-success run or SLA breach")
     return parser.parse_args(argv)
 
@@ -483,6 +562,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             max_staleness_days=args.max_staleness_days,
             sleep_ms=args.sleep_ms,
             strict=args.strict,
+            max_full_resyncs=args.max_full_resyncs,
         )
     finally:
         conn.close()

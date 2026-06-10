@@ -6,7 +6,7 @@ https://merolagani.com/CompanyDetail.aspx?symbol=SYMBOL
 
 Design goals:
 - Robust parsing across minor HTML/layout changes
-- Idempotent persistence into SQLite (see database_extended.py helpers)
+- Idempotent persistence into SQLite (see database.py schema helpers)
 - Explicit, explainable outputs suitable for UI display
 """
 
@@ -22,7 +22,7 @@ import sqlite3
 import requests
 from bs4 import BeautifulSoup
 
-from .database import get_db_connection
+from .database import get_db_connection, _ensure_corporate_actions_schema
 
 
 MEROLAGANI_BASE = "https://merolagani.com"
@@ -228,30 +228,32 @@ def parse_corporate_actions_from_company_detail_html(
 
 def ensure_corporate_actions_tables(conn: sqlite3.Connection) -> None:
     """
-    Keep the DDL close to the ingestion logic for robustness.
-    database_extended.py calls a similar helper; this is used by callers that
-    don’t import the extended schema module.
+    Ensure the unified corporate_actions table exists.
+
+    The canonical (schema-A) table is created by ``database.init_db``; this keeps
+    the same base DDL for callers that haven't run init_db, then delegates the
+    extra scraper columns to the single source of truth in database.py.
     """
     cur = conn.cursor()
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS corporate_actions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
             symbol TEXT NOT NULL,
             fiscal_year TEXT,
             bookclose_date DATE,
-            description TEXT,
-            agenda TEXT,
-            cash_dividend_pct REAL,
-            bonus_share_pct REAL,
+            cash_dividend_pct REAL DEFAULT 0,
+            bonus_share_pct REAL DEFAULT 0,
             right_share_ratio TEXT,
-            source_url TEXT,
-            scraped_at_utc TEXT NOT NULL,
-            PRIMARY KEY (symbol, fiscal_year, bookclose_date, description)
+            agenda TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(symbol, bookclose_date)
         )
         """
     )
     cur.execute("CREATE INDEX IF NOT EXISTS idx_corp_actions_symbol ON corporate_actions(symbol)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_corp_actions_bookclose ON corporate_actions(bookclose_date)")
+    _ensure_corporate_actions_schema(cur)
 
 
 def upsert_corporate_actions(rows: List[CorporateActionRow]) -> int:
@@ -260,6 +262,13 @@ def upsert_corporate_actions(rows: List[CorporateActionRow]) -> int:
     conn = get_db_connection()
     ensure_corporate_actions_tables(conn)
     cur = conn.cursor()
+    # SQLite treats NULLs as distinct in UNIQUE(symbol, bookclose_date), so
+    # clear prior NULL-bookclose rows per symbol to keep rescrapes idempotent.
+    for symbol in {r.symbol for r in rows}:
+        cur.execute(
+            "DELETE FROM corporate_actions WHERE symbol = ? AND bookclose_date IS NULL",
+            (symbol,),
+        )
     inserted = 0
     for r in rows:
         cur.execute(
@@ -275,8 +284,8 @@ def upsert_corporate_actions(rows: List[CorporateActionRow]) -> int:
                 r.bookclose_date_ad.isoformat() if r.bookclose_date_ad else None,
                 r.description,
                 r.agenda,
-                r.cash_dividend_pct,
-                r.bonus_share_pct,
+                r.cash_dividend_pct if r.cash_dividend_pct is not None else 0.0,
+                r.bonus_share_pct if r.bonus_share_pct is not None else 0.0,
                 r.right_share_ratio,
                 r.source_url,
                 r.scraped_at_utc.isoformat(),

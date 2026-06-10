@@ -23,6 +23,8 @@ from validation.monte_carlo import (
     BootstrapResult,
 )
 from validation.kill_switch import KillSwitch, KillReason
+from validation.run_all import resolve_config_kwargs, LEGACY_CONFIG_KWARGS
+from configs.long_term import LONG_TERM_CONFIG
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -339,3 +341,45 @@ class TestKillSwitch:
             daily_pnl=-5_000, daily_start_nav=1_000_000,
         )
         assert halt is False
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Config Selection
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestResolveConfigKwargs:
+    """Config selection for the validation runner."""
+
+    def test_default_is_shipped_c5_baseline(self):
+        """The default 'long_term' config must be the shipped 6-signal C5 baseline."""
+        kwargs = resolve_config_kwargs("long_term")
+        assert kwargs["signal_types"] == LONG_TERM_CONFIG["signal_types"]
+        assert len(kwargs["signal_types"]) == 6
+        assert "quarterly_fundamental" in kwargs["signal_types"]
+        assert "xsec_momentum" in kwargs["signal_types"]
+        assert kwargs["holding_days"] == LONG_TERM_CONFIG["holding_days"]
+        assert kwargs["max_positions"] == LONG_TERM_CONFIG["max_positions"]
+
+    def test_long_term_does_not_mutate_source_config(self):
+        """Resolving must return a copy, not the live LONG_TERM_CONFIG dict."""
+        kwargs = resolve_config_kwargs("long_term")
+        kwargs["holding_days"] = 999
+        assert LONG_TERM_CONFIG["holding_days"] != 999
+
+    def test_long_term_runnable_with_trailing_stop(self):
+        """C5 config must carry use_trailing_stop for the backtest call."""
+        kwargs = resolve_config_kwargs("long_term")
+        assert kwargs["use_trailing_stop"] is True
+
+    def test_legacy_is_three_signal_config(self):
+        """'legacy' must reproduce the old 3-signal volume/quality/low_vol config."""
+        kwargs = resolve_config_kwargs("legacy")
+        assert kwargs["signal_types"] == ["volume", "quality", "low_vol"]
+        assert kwargs == LEGACY_CONFIG_KWARGS
+
+    def test_legacy_does_not_mutate_template(self):
+        """Resolving 'legacy' must return a copy of the template."""
+        kwargs = resolve_config_kwargs("legacy")
+        kwargs["max_positions"] = 999
+        assert LEGACY_CONFIG_KWARGS["max_positions"] != 999

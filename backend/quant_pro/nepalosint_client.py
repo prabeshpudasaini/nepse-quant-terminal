@@ -1,8 +1,12 @@
 """
 NepalOSINT API client for semantic and unified search.
 
-NOTE: The NepalOSINT API endpoints used here are not publicly accessible.
-Access is restricted — contact @nlethetech on X (Twitter) to request API access.
+NOTE: This OSINT enrichment service is OPTIONAL and self-hosted. It is disabled
+by default in the public build — no base URL is configured, so every function
+degrades gracefully (empty result, no network call) until you point it at your
+own endpoint. Configure it via the NEPALOSINT_BASE_URL or NEPALOSINT_API_BASE_URL
+environment variable (or pass an explicit base_url argument). An optional
+NEPALOSINT_API_KEY enables authenticated access.
 """
 
 from __future__ import annotations
@@ -16,7 +20,7 @@ from typing import Any
 import requests
 from requests import Timeout
 
-DEFAULT_OSINT_BASE_URL = "https://nepalosint.com/api/v1"
+DEFAULT_OSINT_BASE_URL = ""
 DEFAULT_TIMEOUT_SECONDS = 8
 _TOKEN_CACHE: dict[str, Any] = {"base_url": "", "token": "", "expires_at": 0.0}
 _TOKEN_LOCK = threading.Lock()
@@ -119,6 +123,11 @@ def _request_json(
     timeout: int = DEFAULT_TIMEOUT_SECONDS,
 ) -> Any:
     api_root = resolve_osint_base_url(base_url)
+    if not api_root:
+        # Service is not configured (default in the public build): no base URL
+        # means no network call. Callers catch this and return their neutral
+        # empty result.
+        raise RuntimeError("NepalOSINT base URL is not configured")
     api_key = str(os.environ.get("NEPALOSINT_API_KEY", "")).strip()
     request = requests.get if method.upper() == "GET" else requests.post
 

@@ -101,13 +101,19 @@ def ts(dt: datetime) -> int:
 
 def backfill_symbol(symbol: str, start: datetime, end: datetime) -> int:
     from backend.quant_pro.database import save_to_db
+    from backend.quant_pro.data_io import resync_full_history
     from backend.quant_pro.vendor_api import fetch_ohlcv_chunk
     try:
         df = fetch_ohlcv_chunk(symbol, ts(start), ts(end))
         if df is None or df.empty:
             return 0
         df["symbol"] = symbol
-        save_to_db(df, symbol)
+        # This fetches a rolling window over a possibly-deep DB, so a re-base
+        # written in log mode would splice at the window boundary. Abort instead
+        # and re-fetch the whole series on the new basis.
+        result = save_to_db(df, symbol, on_rebase="abort")
+        if result.rebase_detected:
+            resync_full_history(symbol)
         return len(df)
     except Exception as e:
         print(f"  WARN {symbol}: {e}")

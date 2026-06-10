@@ -1,11 +1,25 @@
 from __future__ import annotations
 
+import pytest
+
 from backend.quant_pro.nepalosint_client import (
     consolidated_stories,
     consolidated_stories_history,
+    related_stories,
     resolve_osint_base_url,
+    semantic_story_search,
+    symbol_intelligence,
     unified_search,
 )
+
+
+def _clear_osint_env(monkeypatch):
+    for name in (
+        "NEPALOSINT_BASE_URL",
+        "NEPALOSINT_API_BASE_URL",
+        "NEPALOSINT_API_KEY",
+    ):
+        monkeypatch.delenv(name, raising=False)
 
 
 class DummyResponse:
@@ -113,3 +127,40 @@ def test_consolidated_stories_accepts_dict_payloads(monkeypatch):
     stories = consolidated_stories(limit=3)
 
     assert stories == [{"title": "Headline", "url": "https://example.com/story"}]
+
+
+def test_resolve_osint_base_url_disabled_by_default(monkeypatch):
+    _clear_osint_env(monkeypatch)
+
+    assert resolve_osint_base_url() == ""
+
+
+def test_client_functions_noop_without_base(monkeypatch):
+    _clear_osint_env(monkeypatch)
+
+    def _boom(*_args, **_kwargs):
+        raise AssertionError("network call attempted while OSINT is disabled")
+
+    monkeypatch.setattr("backend.quant_pro.nepalosint_client.requests.get", _boom, raising=False)
+    monkeypatch.setattr("backend.quant_pro.nepalosint_client.requests.post", _boom, raising=False)
+
+    assert semantic_story_search("banking")["results"] == []
+    assert unified_search("banking")["categories"] == {}
+    assert consolidated_stories() == []
+    assert consolidated_stories_history(start_date="2025-04-05", end_date="2025-04-05")["items"] == []
+    assert related_stories("story-1")["similar_stories"] == []
+    assert symbol_intelligence("banking")["story_count"] == 0
+
+
+def test_dashboard_osint_helpers_disabled_without_base(monkeypatch):
+    dashboard = pytest.importorskip("apps.tui.dashboard_tui")
+
+    def _boom(*_args, **_kwargs):
+        raise AssertionError("network call attempted while OSINT is disabled")
+
+    monkeypatch.setattr(dashboard, "OSINT_BASE", "", raising=False)
+    monkeypatch.setattr(dashboard._requests, "get", _boom, raising=False)
+    monkeypatch.setattr(dashboard._requests, "post", _boom, raising=False)
+
+    assert dashboard._fetch_osint_stories() == []
+    assert dashboard._fetch_osint_brief() == {}

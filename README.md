@@ -1,8 +1,10 @@
-#NEPSE Quant Terminal
+# NEPSE Quant Terminal
 
 A terminal-based quantitative trading dashboard for the Nepal Stock Exchange (NEPSE), built with [Textual](https://textual.textualize.io/). Runs entirely in your terminal — no browser, no electron, no cloud dependency.
 
 **Paper trading only.** This terminal simulates trades locally. It does not connect to any broker API.
+
+> ⚠️ **Disclaimer — read this first.** This is an **educational research tool, not financial advice.** It does not connect to a broker and cannot place real orders. The bundled backtest figures are **in-sample / historical** — they come from a parameter sweep, are **not** corrected for the number of strategy variants tried, and the repo ships **no artifact that reproduces them as forward-tested returns.** Treat them as a demonstration of the tooling, not as proof of an edge. Past performance does not indicate future results. Nothing here is a recommendation to buy or sell any security. See [docs/VALIDATION_METHODOLOGY.md](docs/VALIDATION_METHODOLOGY.md).
 
 ---
 
@@ -10,14 +12,14 @@ A terminal-based quantitative trading dashboard for the Nepal Stock Exchange (NE
 
 - **Paper Trading** — full paper portfolio with buy/sell order book, P&L tracking, NAV history, and multi-account support. Seed from your MeroShare holdings CSV or start blank.
 - **Auto Trading Engine** — assigns a quantitative strategy to each account. The engine runs in the background, generates signals every 5 trading days, and manages entries/exits automatically (holding periods, stop losses, trailing stops, regime filters).
-- **Backtesting** — walk-forward validated backtests on 6+ years of NEPSE price data. Ships with C5 baseline: **+88% OOS return, Sharpe 2.2** vs. NEPSE +27%.
+- **Backtesting** — backtests on 6+ years of NEPSE price data, with a walk-forward replay harness and a statistical validation suite. The bundled C5 baseline shows a *historical, in-sample* +88% return (Sharpe ~2.2) vs. NEPSE +27% — a figure from a parameter sweep, **not corrected for multiple testing and not a forward-performance claim** (the repo ships no artifact reproducing it). Run the validation suite (deflated Sharpe, random-baseline percentile, CSCV/PBO) to see how it holds up; see [docs/VALIDATION_METHODOLOGY.md](docs/VALIDATION_METHODOLOGY.md).
 - **Market Dashboard** — live quotes, 52-week highs/lows, top movers, sector heatmap, volume signals.
 - **Portfolio Analytics** — unrealized/realized P&L, sector concentration, holding age buckets, max drawdown, alpha vs. NEPSE benchmark.
 - **Gold Hedge Overlay** — tracks gold/silver regime (risk-on / neutral / risk-off) and adjusts capital deployment accordingly.
 - **AI Agent** — on-demand analysis of your portfolio positions and signal shortlist. Defaults to a local Ollama model, with Gemma 4 MLX or Claude CLI available as optional backends.
 - **Paper Agent Graph** — cleaned evidence-gated research, debate, risk, and portfolio decision workflow for paper execution only.
 - **Strategy Builder** — create, backtest, and assign custom strategies. Each account runs its own strategy independently.
-- **Statistical Validation** — walk-forward OOS testing, Monte Carlo, CSCV/PBO overfitting detection, deflated Sharpe ratio, random baseline percentile.
+- **Statistical Validation** — walk-forward replay across rolling subwindows, Monte Carlo, CSCV/PBO overfitting detection, deflated Sharpe ratio, random baseline percentile. See [docs/VALIDATION_METHODOLOGY.md](docs/VALIDATION_METHODOLOGY.md) for what each test does and does not prove.
 - **MeroShare Import** — seed any account directly from your MeroShare "My Shares Values.csv" export.
 
 ---
@@ -66,7 +68,7 @@ The public agent workflow is evidence-gated, checkpointed, and restricted to pap
 | Gold Hedge | `backend/quant_pro/gold_hedge.py` | Gold/silver regime detection → capital deployment % |
 | AI Agent | `backend/agents/agent_analyst.py` | Ollama-first portfolio and signal analysis |
 | Paper Agent Graph | `backend/nepse_agents/` | Evidence-gated research/debate/risk/portfolio workflow; paper-only |
-| NEPSE Calendar | `nepse_calendar.py` | Sun–Thu trading days, public holidays, trading day counter |
+| NEPSE Calendar | `backend/quant_pro/nepse_calendar.py` | Trading-day week (Mon–Fri default), public holidays, trading day counter |
 
 ---
 
@@ -124,6 +126,8 @@ The engine runs a **5-trading-day signal cycle** — signals fire every 5 days, 
 from backend.backtesting.simple_backtest import run_backtest
 
 results = run_backtest(
+    start_date="2020-01-01",   # required
+    end_date="2025-12-31",     # required
     signal_types=["volume", "quality", "low_vol", "mean_reversion",
                   "xsec_momentum", "quarterly_fundamental"],
     holding_days=40,
@@ -135,13 +139,32 @@ results = run_backtest(
 )
 ```
 
-Walk-forward validation splits 6+ years of history into rolling train/test windows and stitches OOS equity:
+The walk-forward phase slides a train/test window across 6+ years of history, re-runs the backtest on each rolling test window, and stitches the out-of-sample equity curves together. Note: it **replays a fixed config** on each window — it does not re-select or re-fit parameters per window, so it is a robustness check, not true out-of-sample model selection. See [docs/VALIDATION_METHODOLOGY.md](docs/VALIDATION_METHODOLOGY.md).
 
 ```bash
 python -m validation.run_all --fast
 ```
 
-Outputs: OOS equity curve, Sharpe, max drawdown, CSCV/PBO score, deflated Sharpe ratio, random baseline percentile.
+Outputs: stitched OOS equity curve, Sharpe, max drawdown, CSCV/PBO score, deflated Sharpe ratio, random baseline percentile.
+
+### Validating the shipped strategy
+
+The validation suite validates the bundled 6-signal C5 baseline (`configs/long_term.py` `LONG_TERM_CONFIG`) by default — the same strategy the auto-trading engine ships with — so the headline figure and the validated strategy are the same thing:
+
+```bash
+python -m validation.run_all          # full battery, C5 baseline
+python -m validation.run_all --fast   # quick mode (fewer simulations)
+```
+
+To validate a different strategy, override the config or individual parameters:
+
+```bash
+python -m validation.run_all --config legacy                 # old 3-signal volume/quality/low_vol config
+python -m validation.run_all --signals volume quality        # ad-hoc signal set
+python -m validation.run_all --holding-days 60               # override one parameter on top of C5
+```
+
+The suite prints a GO / NO-GO verdict and writes a JSON + PDF report under `reports/validation/`. The GO verdict is gated on a subset of the tests (base backtest, transaction costs, statistical significance, walk-forward, Monte Carlo, regime stress, sensitivity, random baseline, slippage, max drawdown). **The CSCV/PBO overfitting test and the benchmark (alpha-vs-beta) comparison run and report, but do not gate the verdict** — read them anyway. See [docs/VALIDATION_METHODOLOGY.md](docs/VALIDATION_METHODOLOGY.md) for what each test does and does not prove.
 
 ---
 
@@ -255,7 +278,7 @@ Takes under a minute. You get 456K rows of OHLCV history for all NEPSE symbols, 
 
 > **Important:** The bundled database is a snapshot. For accurate signals and backtests you must keep it up to date with fresh scraped data. The pre-built DB covers history through the release date — anything after that requires running the scraper.
 
-**Scrape fresh data yourself (recommended for production use):**
+**Scrape fresh data yourself (to keep the snapshot current):**
 ```bash
 python setup_data.py --scrape           # full historical scrape from Merolagani (~30–60 min)
 python setup_data.py --scrape --days 90 # last 90 days only (~5 min)
@@ -457,7 +480,7 @@ nepse-quant-terminal/
 │       ├── regime_detection.py     # Market regime classifier
 │       └── paths.py                # Project path utilities
 ├── configs/
-│   └── long_term.py            # Default strategy parameters
+│   └── long_term.py            # Default strategy parameters (C5 baseline)
 ├── data/
 │   └── strategy_registry/      # Strategy JSON configs
 ├── validation/                 # Statistical validation suite
@@ -466,19 +489,30 @@ nepse-quant-terminal/
 │   ├── cscv_pbo.py
 │   ├── statistical_tests.py
 │   └── run_all.py
-├── nepse_calendar.py           # NEPSE trading calendar (Sun–Thu)
 └── requirements.txt
 ```
+
+The NEPSE trading calendar lives at `backend/quant_pro/nepse_calendar.py`.
 
 ---
 
 ## Notes
 
 - **Paper trading only.** No broker API. All trades are simulated locally.
-- NEPSE trades **Sunday–Thursday**. The calendar module handles all public holidays.
+- NEPSE trades **Monday–Friday** by default (it switched from Sunday–Thursday in April 2026). Set `NEPSE_TRADING_WEEK=sun_thu` to use the legacy calendar. The calendar module handles public holidays.
 - Holding periods are in **trading days**, not calendar days. 40 trading days ≈ 8 NEPSE weeks.
 - The backtest includes realistic transaction costs: SEBON levy, broker commission, DP charges.
 - The gold hedge module uses Nepal Rastra Bank gold price data — no external API required.
+
+### Backtest caveats (read before trusting any return figure)
+
+The base backtest engine is intentionally simple, and these limitations inflate headline returns:
+
+- **No slippage in the base engine.** `run_backtest` charges fees but fills at the open with zero slippage. Slippage is only estimated in a separate validation phase (`validation/slippage.py`); the +88% figure does not include it.
+- **Circuit-locked days fill at the band.** Entry prices are clamped to the ±10% circuit limit (`apply_circuit_breaker`), so a day where a stock is limit-locked still "fills" at the band — a price you often could not actually transact at on a thin NEPSE name.
+- **Survivorship bias.** The universe is the set of symbols currently in the bundled database (a static snapshot). Delisted/suspended names are not reconstructed point-in-time, which biases historical results upward.
+
+Run `python -m validation.run_all` and read the deflated Sharpe, random-baseline percentile, and benchmark (alpha vs. beta) outputs rather than the headline return. See [docs/VALIDATION_METHODOLOGY.md](docs/VALIDATION_METHODOLOGY.md).
 
 ---
 
