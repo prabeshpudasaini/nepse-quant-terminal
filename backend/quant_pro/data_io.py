@@ -15,7 +15,15 @@ from tenacity import (
     before_sleep_log,
 )
 # Ensure .database module is available for init_db, etc.
-from .database import init_db, get_latest_date, save_to_db, load_from_db
+from .database import (
+    init_db,
+    get_latest_date,
+    get_overlap_start_date,
+    save_to_db,
+    load_from_db,
+    register_pending_resync,
+    clear_pending_resync,
+)
 from .vendor_api import _rate_limiter, fetch_latest_ltp
 
 # Configure logging for data_io module
@@ -262,6 +270,23 @@ def fetch_sector_history(sector_symbol: str, duration_days: int = 3650) -> pd.Da
         logger.error(f"Sector {sector_symbol}: Unexpected error: {type(e).__name__}: {e}")
         return pd.DataFrame()
 
+def resync_full_history(symbol: str) -> bool:
+    """Vendor re-based: re-fetch ~10y and rewrite the whole series on the new basis.
+
+    Returns True on a successful rewrite. On a failed fetch the symbol is queued
+    in pending_full_resync for retry and the DB is left untouched (fail-closed).
+    """
+    start = datetime.now() - timedelta(days=365 * 10)
+    df = fetch_chunk(symbol, start.timestamp(), time.time())
+    if df is None or df.empty:
+        register_pending_resync(symbol)
+        return False
+    df = df.drop_duplicates(subset=["Date"], keep="last")
+    save_to_db(df, symbol, on_rebase="log", log_reason="full_resync")
+    clear_pending_resync(symbol)
+    return True
+
+
 def _fetch_dynamic_data(symbol: str) -> pd.DataFrame:
     """
     ROBUST DATA SYNCHRONIZATION LOGIC.
@@ -284,7 +309,10 @@ def _fetch_dynamic_data(symbol: str) -> pd.DataFrame:
     # --- STEP 2: Incremental Update ---
     elif last_date < today:
         with _spinner_context(f"Fetching updates since {last_date}..."):
-            start_ts = pd.Timestamp(last_date).timestamp()
+            # Widen the window to overlap the last few stored bars so a vendor
+            # re-base is detectable; this adds no extra HTTP requests.
+            overlap_start = get_overlap_start_date(symbol, 5) or last_date
+            start_ts = pd.Timestamp(overlap_start).timestamp()
             new_data = fetch_chunk(symbol, start_ts, time.time())
         
     # --- STEP 3: Live Candle (Today's Price) ---
@@ -295,7 +323,15 @@ def _fetch_dynamic_data(symbol: str) -> pd.DataFrame:
 
     if not new_data.empty:
         new_data = new_data.drop_duplicates(subset=["Date"], keep="last")
-        save_to_db(new_data, symbol)
+        if last_date is None:
+            # STEP 1 full fetch: rewriting the whole series on the new basis is the intent.
+            save_to_db(new_data, symbol, on_rebase="log")
+        else:
+            # STEP 2 incremental: never persist a half-spliced series.
+            result = save_to_db(new_data, symbol, on_rebase="abort")
+            if result.rebase_detected:
+                with _spinner_context(f"{symbol}: vendor re-based history — full re-sync..."):
+                    resync_full_history(symbol)
     elif live_df.empty and last_date is None:
         _report_error(f"Could not fetch any data for {symbol}.")
         return pd.DataFrame()

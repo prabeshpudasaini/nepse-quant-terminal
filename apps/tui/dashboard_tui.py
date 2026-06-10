@@ -1995,7 +1995,7 @@ def _ensure_lookup_history(symbol: str, *, min_sessions: int = 2, history_days: 
         start_ts = int((datetime.now() - timedelta(days=max(30, int(history_days)))).timestamp())
         fetched = fetch_ohlcv_chunk(sym, start_ts=start_ts, end_ts=end_ts)
         if fetched is not None and not fetched.empty:
-            save_to_db(fetched, sym)
+            save_to_db(fetched, sym, on_rebase="abort")
             return int(len(fetched))
     except Exception:
         return current_count

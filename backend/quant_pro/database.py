@@ -3,9 +3,10 @@ import logging
 import os
 import sqlite3
 import time
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, Optional
+from typing import Any, Dict, Iterable, List, Optional
 
 import pandas as pd
 
@@ -17,6 +18,15 @@ logger = logging.getLogger(__name__)
 
 # Flag to track if WAL mode has been initialized
 _wal_initialized = False
+
+# Tolerances for the save-path re-base detector.
+# LOG_TOL is absolute: unchanged JSON floats reproduce exactly, so anything
+# beyond it is a genuine retro change worth logging.
+# REBASE_RTOL is relative: the smallest real NEPSE events (small rights/bonus)
+# shift prices by >=1%, while float jitter is well under 0.1%, so a relative
+# move beyond REBASE_RTOL classifies a vendor re-base.
+LOG_TOL = 1e-9
+REBASE_RTOL = 1e-3
 
 
 def get_db_path() -> Path:
@@ -90,6 +100,73 @@ def get_db_connection(timeout: float = 60.0, retries: int = 3) -> sqlite3.Connec
     raise DatabaseError(f"Failed to connect after {retries} attempts: {last_err}") from last_err
 
 
+def _ensure_column(cursor: sqlite3.Cursor, table: str, column: str, decl: str) -> bool:
+    """Add ``column`` to ``table`` if missing (SQLite has no IF NOT EXISTS on
+    ADD COLUMN). Returns True iff the column was added by this call."""
+    have = {row[1] for row in cursor.execute(f"PRAGMA table_info({table})")}
+    if column not in have:
+        cursor.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+        return True
+    return False
+
+
+def _ensure_price_adjustment_schema(cursor: sqlite3.Cursor) -> None:
+    """Idempotent guard for raw_close + the adjustment audit log + resync queue."""
+    added = _ensure_column(cursor, "stock_prices", "raw_close", "REAL")
+    if added:
+        # One-time eager backfill: best-effort "as first seen" = current stored close.
+        cursor.execute("UPDATE stock_prices SET raw_close = close WHERE raw_close IS NULL")
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS price_adjustment_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            symbol TEXT NOT NULL,
+            date DATE NOT NULL,
+            old_close REAL,
+            new_close REAL,
+            ratio REAL,
+            reason TEXT NOT NULL DEFAULT 'resave',
+            detected_at_utc TEXT NOT NULL
+        )
+    ''')
+    cursor.execute('''
+        CREATE INDEX IF NOT EXISTS idx_price_adjustment_log_symbol
+        ON price_adjustment_log (symbol, date)
+    ''')
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS pending_full_resync (
+            symbol TEXT PRIMARY KEY,
+            first_detected_at_utc TEXT NOT NULL,
+            last_attempt_utc TEXT,
+            attempts INTEGER NOT NULL DEFAULT 0
+        )
+    ''')
+
+
+def _ensure_corporate_actions_schema(cursor: sqlite3.Cursor) -> None:
+    """Idempotent guard unifying the corporate_actions schema onto a superset.
+
+    The base table (schema A) is created by ``init_db``; this adds the extra
+    columns the scraper writes. For DBs whose table was created standalone by the
+    scraper (schema B), these calls are no-ops and the schema-A-only columns are
+    backfilled instead — both ancestries converge on a working superset.
+    """
+    _ensure_column(cursor, "corporate_actions", "description", "TEXT")
+    _ensure_column(cursor, "corporate_actions", "source_url", "TEXT")
+    _ensure_column(cursor, "corporate_actions", "scraped_at_utc", "TEXT")
+    _ensure_column(cursor, "corporate_actions", "cash_dividend_pct", "REAL DEFAULT 0")
+    _ensure_column(cursor, "corporate_actions", "bonus_share_pct", "REAL DEFAULT 0")
+    _ensure_column(cursor, "corporate_actions", "right_share_ratio", "TEXT")
+    _ensure_column(cursor, "corporate_actions", "agenda", "TEXT")
+    _ensure_column(cursor, "corporate_actions", "fiscal_year", "TEXT")
+
+
+@dataclass
+class SaveResult:
+    rows_saved: int = 0
+    retro_changes: int = 0        # rows whose stored close differed beyond LOG_TOL
+    rebase_detected: bool = False  # any row beyond REBASE_RTOL -> vendor re-based
+
+
 def _dedupe_stock_prices(cursor: sqlite3.Cursor) -> None:
     """Keep the newest row for each legacy duplicate (symbol, date) pair."""
     cursor.execute(
@@ -134,6 +211,7 @@ def init_db():
             PRIMARY KEY (symbol, date)
         )
     ''')
+    _ensure_price_adjustment_schema(cursor)
     _dedupe_stock_prices(cursor)
     cursor.execute('''
         CREATE UNIQUE INDEX IF NOT EXISTS idx_stock_prices_symbol_date_unique
@@ -169,6 +247,7 @@ def init_db():
         CREATE INDEX IF NOT EXISTS idx_corporate_actions_symbol
         ON corporate_actions (symbol)
     ''')
+    _ensure_corporate_actions_schema(cursor)
 
     # Raw intraday market snapshots for audit/replay of upstream payloads.
     cursor.execute(
@@ -557,9 +636,87 @@ def get_latest_date(symbol):
     conn.close()
     return pd.to_datetime(result).date() if result else None
 
-def save_to_db(df, symbol):
-    """Saves new data to SQLite, ignoring duplicates."""
-    if df.empty: return
+
+def get_overlap_start_date(symbol: str, n_bars: int = 5) -> Optional[str]:
+    """Date of the n_bars-th most recent stored bar (falls back to the oldest
+    stored bar when fewer exist), or None when the symbol has no rows.
+
+    Used to widen the incremental fetch window so the re-base detector always has
+    overlapping bars to compare; it adds no extra HTTP requests.
+    """
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT COUNT(*) FROM stock_prices WHERE symbol = ?", (symbol,))
+    count = int(cursor.fetchone()[0] or 0)
+    if count == 0:
+        conn.close()
+        return None
+    offset = min(n_bars - 1, count - 1)
+    cursor.execute(
+        "SELECT date FROM stock_prices WHERE symbol = ? ORDER BY date DESC LIMIT 1 OFFSET ?",
+        (symbol, offset),
+    )
+    row = cursor.fetchone()
+    conn.close()
+    return str(row[0]) if row and row[0] is not None else None
+
+
+def register_pending_resync(symbol: str) -> None:
+    """Queue ``symbol`` for a full-history re-fetch (UPSERT, bump attempts)."""
+    now_iso = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    _ensure_price_adjustment_schema(cursor)
+    cursor.execute(
+        '''
+        INSERT INTO pending_full_resync (symbol, first_detected_at_utc, last_attempt_utc, attempts)
+        VALUES (?, ?, ?, 1)
+        ON CONFLICT(symbol) DO UPDATE SET
+            last_attempt_utc = excluded.last_attempt_utc,
+            attempts = attempts + 1
+        ''',
+        (symbol, now_iso, now_iso),
+    )
+    conn.commit()
+    conn.close()
+
+
+def clear_pending_resync(symbol: str) -> None:
+    """Remove ``symbol`` from the full-history re-fetch queue."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    _ensure_price_adjustment_schema(cursor)
+    cursor.execute("DELETE FROM pending_full_resync WHERE symbol = ?", (symbol,))
+    conn.commit()
+    conn.close()
+
+
+def list_pending_resyncs() -> List[str]:
+    """Return symbols currently queued for a full-history re-fetch."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    _ensure_price_adjustment_schema(cursor)
+    cursor.execute("SELECT symbol FROM pending_full_resync ORDER BY symbol ASC")
+    rows = cursor.fetchall()
+    conn.close()
+    return [str(r[0]) for r in rows]
+
+def save_to_db(df, symbol, *, on_rebase: str = "log", log_reason: str = "resave") -> "SaveResult":
+    """Save OHLCV rows, preserving first-seen ``raw_close`` and auditing changes.
+
+    Every re-save is compared against the stored close: changes beyond ``LOG_TOL``
+    are recorded in ``price_adjustment_log``; a relative change beyond
+    ``REBASE_RTOL`` flags a vendor re-base.
+
+    ``on_rebase``:
+        ``"log"`` (default) — rewrite every row on the new basis (the intent of a
+        full-history save) and log the changes.
+        ``"abort"`` — when a re-base is detected, write no price rows; only the
+        detection evidence is persisted (``reason='rebase_overlap'``). The DB
+        stays on a single (old) basis until a full re-fetch replaces it.
+    """
+    if df.empty:
+        return SaveResult()
 
     conn = get_db_connection()
     df = df.copy()
@@ -578,7 +735,7 @@ def save_to_db(df, symbol):
             df = df.loc[~bad].copy()
             if df.empty:
                 conn.close()
-                return
+                return SaveResult()
     except (KeyError, ValueError, TypeError) as exc:
         logger.debug("Data hygiene check skipped: %s", exc)
 
@@ -586,15 +743,98 @@ def save_to_db(df, symbol):
     df_to_save = df[["symbol", "date", "Open", "High", "Low", "Close", "Volume"]]
     df_to_save.columns = ["symbol", "date", "open", "high", "low", "close", "volume"]
 
-    # Efficient Upsert (Insert or Ignore)
     cursor = conn.cursor()
+    _ensure_price_adjustment_schema(cursor)
+    # Commit the migration before any data work: the abort path rolls back the
+    # transaction, and the DDL must not be undone with it on a first-run DB.
+    conn.commit()
+
+    # Pre-read existing rows for the incoming dates so we can preserve raw_close
+    # (first-seen close) and compare against the new basis.
+    incoming_dates = list(df_to_save["date"])
+    existing: Dict[str, tuple] = {}
+    if incoming_dates:
+        placeholders = ",".join("?" for _ in incoming_dates)
+        cursor.execute(
+            f'''
+            SELECT date, close, raw_close FROM stock_prices
+            WHERE symbol = ? AND date IN ({placeholders})
+            ''',
+            [symbol, *incoming_dates],
+        )
+        for row in cursor.fetchall():
+            existing[str(row[0])] = (row[1], row[2])
+
+    now_iso = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    rows: List[tuple] = []
+    adjustments: List[tuple] = []
+    retro_changes = 0
+    rebase_detected = False
+
+    for r in df_to_save.itertuples(index=False):
+        new_close = r.close
+        prior = existing.get(r.date)
+        if prior is not None:
+            old_close, old_raw = prior
+            # Lazy first-seen preservation/backfill.
+            raw_close = old_raw if old_raw is not None else old_close
+            if old_close is not None and abs(old_close - new_close) > LOG_TOL:
+                ratio = (new_close / old_close) if old_close else None
+                adjustments.append(
+                    (symbol, r.date, old_close, new_close, ratio, log_reason, now_iso)
+                )
+                retro_changes += 1
+                if old_close and abs((new_close / old_close) - 1.0) > REBASE_RTOL:
+                    rebase_detected = True
+        else:
+            raw_close = new_close
+        rows.append((r.symbol, r.date, r.open, r.high, r.low, new_close, r.volume, raw_close))
+
+    if on_rebase == "abort" and rebase_detected:
+        # Persist no price rows; keep only the detection evidence so the series
+        # stays on one consistent (old) basis until a full re-fetch replaces it.
+        conn.rollback()
+        rebase_log = [
+            (a[0], a[1], a[2], a[3], a[4], "rebase_overlap", a[6]) for a in adjustments
+        ]
+        cursor.executemany(
+            '''
+            INSERT INTO price_adjustment_log (
+                symbol, date, old_close, new_close, ratio, reason, detected_at_utc
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            ''',
+            rebase_log,
+        )
+        conn.commit()
+        conn.close()
+        logger.warning(
+            "%s: vendor re-base detected in overlap (%d rows); aborting incremental save",
+            symbol, len(adjustments),
+        )
+        return SaveResult(rows_saved=0, retro_changes=retro_changes, rebase_detected=True)
+
     cursor.executemany('''
-        INSERT OR REPLACE INTO stock_prices (symbol, date, open, high, low, close, volume)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-    ''', df_to_save.values.tolist())
+        INSERT OR REPLACE INTO stock_prices (symbol, date, open, high, low, close, volume, raw_close)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    ''', rows)
+
+    if adjustments:
+        cursor.executemany(
+            '''
+            INSERT INTO price_adjustment_log (
+                symbol, date, old_close, new_close, ratio, reason, detected_at_utc
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            ''',
+            adjustments,
+        )
+        logger.warning(
+            "%s: %d stored close(s) changed on re-save (reason=%s)",
+            symbol, len(adjustments), log_reason,
+        )
 
     conn.commit()
     conn.close()
+    return SaveResult(rows_saved=len(rows), retro_changes=retro_changes, rebase_detected=rebase_detected)
 
 def load_from_db(symbol):
     """Loads full history for a symbol."""
