@@ -1046,7 +1046,9 @@ def _merge_tms_bundle_with_cache(bundle: Optional[dict]) -> dict:
 TICKER_SPEED = 0.15  # seconds between scroll steps
 
 # ── OSINT API ────────────────────────────────────────────────────────────────
-OSINT_BASE = "http://3.148.250.92/api/v1"
+# Optional, self-hosted OSINT enrichment service. Disabled by default in the
+# public build — set NEPSE_OSINT_BASE to your own endpoint to enable it.
+OSINT_BASE = os.environ.get("NEPSE_OSINT_BASE", "").rstrip("/")
 OSINT_TIMEOUT = 8
 
 SEVERITY_STYLE = {
@@ -1210,7 +1212,9 @@ def _truncate_text(text: str, width: int) -> str:
 
 
 def _fetch_osint_stories(limit: int = 40) -> list[dict]:
-    """Fetch latest stories from Nepal OSINT API."""
+    """Fetch latest stories from Nepal OSINT API (disabled unless configured)."""
+    if not OSINT_BASE:
+        return []
     try:
         r = _requests.get(f"{OSINT_BASE}/analytics/consolidated-stories",
                           params={"limit": limit}, timeout=OSINT_TIMEOUT)
@@ -1220,7 +1224,9 @@ def _fetch_osint_stories(limit: int = 40) -> list[dict]:
         return []
 
 def _fetch_osint_brief() -> dict:
-    """Fetch latest intelligence brief."""
+    """Fetch latest intelligence brief (disabled unless configured)."""
+    if not OSINT_BASE:
+        return {}
     try:
         r = _requests.get(f"{OSINT_BASE}/briefs/latest", timeout=OSINT_TIMEOUT)
         r.raise_for_status()
@@ -5876,6 +5882,8 @@ class NepseDashboard(App):
         self.call_from_thread(self._set_status, f"Vector search: \"{query}\"...")
         vector_ok = False
         try:
+            if not OSINT_BASE:
+                raise RuntimeError("OSINT disabled")  # fall through to local search
             r = _requests.post(
                 f"{OSINT_BASE}/embeddings/search",
                 json={"query": query, "top_k": 40, "hours": 8760, "min_similarity": 0.3},

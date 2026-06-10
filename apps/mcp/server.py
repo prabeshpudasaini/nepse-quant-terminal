@@ -19,11 +19,23 @@ from backend.agents.runtime_config import (
     set_active_agent,
 )
 from backend.nepse_agents import run_paper_decision
-from backend.quant_pro.nepalosint_client import (
-    related_stories as nepalosint_related_stories,
-    semantic_story_search as nepalosint_semantic_story_search,
-    unified_search as nepalosint_unified_search,
-)
+# OSINT enrichment is OPTIONAL in the public build (self-hosted service). Degrade
+# to no-op tools rather than failing to import the MCP server.
+try:
+    from backend.quant_pro.nepalosint_client import (
+        related_stories as nepalosint_related_stories,
+        semantic_story_search as nepalosint_semantic_story_search,
+        unified_search as nepalosint_unified_search,
+    )
+except Exception:  # pragma: no cover - optional dependency
+    def nepalosint_related_stories(*_a, **_k):
+        return []
+
+    def nepalosint_semantic_story_search(*_a, **_k):
+        return []
+
+    def nepalosint_unified_search(*_a, **_k):
+        return {}
 from backend.quant_pro.control_plane.command_service import (
     ControlPlaneCommandService,
     build_env_live_trader_control_plane,
