@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 
 from apps.tui import dashboard_tui as tui
+from apps.tui.io import persistence
 from backend.agents import runtime_config
 
 
@@ -18,7 +19,7 @@ def test_watchlist_load_dedupes_and_repairs_existing_file(tmp_path, monkeypatch)
             ]
         )
     )
-    monkeypatch.setattr(tui, "WATCHLIST_FILE", target)
+    monkeypatch.setattr(persistence, "WATCHLIST_FILE", target)
 
     rows = tui._load_watchlist()
 
