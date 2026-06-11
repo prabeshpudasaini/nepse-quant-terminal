@@ -17,14 +17,12 @@ import shlex
 import subprocess
 import sys
 import time
-import textwrap
 import unicodedata
 import uuid
 from datetime import datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Optional
-from urllib.parse import urlparse, unquote
 
 try:
     import fcntl
@@ -73,6 +71,27 @@ from apps.tui.theme import (
     AMBER, WHITE, DIM, LABEL, GAIN_HI, GAIN, LOSS_HI, LOSS, CYAN, YELLOW, PURPLE, BLUE,
 )
 from configs.long_term import LONG_TERM_CONFIG
+
+from apps.tui.render import charts as _charts
+from apps.tui.render.cells import (  # re-export
+    _chg_text,
+    _sym_text,
+    _dim_text,
+    _vol_text,
+    _price_text,
+    _pnl_color,
+    _npr_k,
+    _format_compact_npr,
+    _contains_non_ascii,
+    _truncate_text,
+    _news_display_headline,
+)
+from apps.tui.render.text_blocks import (  # re-export
+    _render_stock_report,
+    _render_lookup_intelligence,
+    _headline_fallback_from_url,
+)
+from apps.tui.render.charts import _render_candlestick_chart, _render_sparkline  # re-export
 
 from backend.quant_pro.paths import (
     ensure_dir,
@@ -1018,10 +1037,6 @@ TYPE_STYLE = {
 _translation_cache: dict[str, str] = {}
 
 
-def _contains_non_ascii(text: str) -> bool:
-    return bool(text and any(ord(c) > 127 for c in text[:20]))
-
-
 # ── Unicode display-width helpers (Devanagari-aware) ─────────────────────────
 
 def _disp_width(text: str) -> int:
@@ -1117,26 +1132,6 @@ def _translate_batch(texts: list[str]) -> list[str]:
     return results
 
 
-def _news_display_headline(story: dict) -> str:
-    """Return the best headline — prefer English, fall back to Nepali."""
-    translated = str(story.get("_translated") or "").strip()
-    if translated:
-        return translated
-    summary = str(story.get("summary") or "").strip()
-    if summary and not _contains_non_ascii(summary):
-        return summary
-    translated_summary = str(story.get("_translated_summary") or "").strip()
-    if translated_summary:
-        return translated_summary
-    url = str(story.get("url") or "").strip()
-    if url:
-        slug = _headline_fallback_from_url(url)
-        if slug:
-            return slug
-    headline = str(story.get("canonical_headline") or "").strip()
-    return headline or "Untitled story"
-
-
 def _news_display_summary(story: dict) -> str:
     """Return the best summary — prefer English, fall back to Nepali."""
     summary = str(story.get("summary") or "").strip()
@@ -1156,13 +1151,6 @@ def _news_display_summary(story: dict) -> str:
     if summary:
         return summary
     return "No summary available."
-
-
-def _truncate_text(text: str, width: int) -> str:
-    text = " ".join(str(text or "").split())
-    if len(text) <= width:
-        return text
-    return text[: max(0, width - 1)].rstrip() + "…"
 
 
 def _fetch_osint_stories(limit: int = 40) -> list[dict]:
@@ -1188,235 +1176,7 @@ def _fetch_osint_brief() -> dict:
     except Exception:
         return {}
 
-# ── Color helpers for DataTable cells ─────────────────────────────────────────
-
-def _chg_text(v: float) -> Text:
-    s = "+" if v >= 0 else ""
-    if v > 2:    c = GAIN_HI
-    elif v > 0:  c = GAIN
-    elif v < -2: c = LOSS_HI
-    elif v < 0:  c = LOSS
-    else:        c = WHITE
-    return Text(f"{s}{v:.2f}%", style=c)
-
-def _sym_text(s: str) -> Text:
-    return Text(s, style=f"bold {WHITE}")
-
-def _dim_text(s: str) -> Text:
-    return Text(s, style=LABEL)
-
-def _vol_text(v: float) -> Text:
-    return Text(_vol(v), style=LABEL)
-
-def _price_text(v: float) -> Text:
-    return Text(f"{v:.1f}", style=WHITE)
-
-def _pnl_color(v: float) -> str:
-    return GAIN_HI if v > 0 else (LOSS_HI if v < 0 else WHITE)
-
-def _npr_k(v: float) -> str:
-    """Format NPR value compactly."""
-    if abs(v) >= 1_000_000: return f"NPR {v/1_000_000:.2f}M"
-    if abs(v) >= 1_000: return f"NPR {v/1_000:.1f}K"
-    return f"NPR {v:.0f}"
-
-
-def _render_stock_report(report: dict) -> Text:
-    """Render deterministic financial report for the lookup pane."""
-    def _append_wrapped_block(
-        target: Text,
-        body: str,
-        *,
-        style: str = WHITE,
-        indent: str = "  ",
-        continuation: str = "  ",
-        width: int = 44,
-    ) -> None:
-        content = str(body or "").strip()
-        if not content:
-            return
-        wrapped = textwrap.fill(content, width=width, initial_indent=indent, subsequent_indent=continuation)
-        target.append(f"{wrapped}\n", style=style)
-
-    text = Text()
-    signal = report.get("signal", "NO DATA")
-    score = int(report.get("score", 0) or 0)
-    score_text = "N/A" if signal == "NO DATA" and score <= 0 else f"{score}/100"
-    signal_style = {
-        "ACCUMULATE": f"bold {GAIN_HI}",
-        "WATCH": f"bold {YELLOW}",
-        "CAUTION": f"bold {LOSS_HI}",
-        "NO DATA": LABEL,
-    }.get(signal, WHITE)
-
-    text.append("  FINANCIAL REPORT\n", style=f"bold {AMBER}")
-    text.append("  Signal", style=LABEL)
-    text.append(f"  {signal}", style=signal_style)
-    text.append("   ", style=WHITE)
-    text.append("Score", style=LABEL)
-    text.append(f"  {score_text}\n", style=f"bold {WHITE}")
-    _append_wrapped_block(
-        text,
-        report.get("summary", "No summary available."),
-        continuation="    ",
-        width=42,
-    )
-
-    company_profile = report.get("company_profile") or {}
-    board = company_profile.get("board") or []
-    officers = company_profile.get("officers") or []
-    company_name = str(company_profile.get("company_name") or "").strip()
-    if company_name or board or officers:
-        text.append("\n  Company Profile\n", style=f"bold {AMBER}")
-        if company_name:
-            text.append("  Name   ", style=LABEL)
-            text.append(f"{company_name}\n", style=WHITE)
-        if board:
-            text.append("  Board of Directors\n", style=LABEL)
-            for item in board:
-                name = str((item or {}).get("name") or "").strip()
-                role = str((item or {}).get("role") or "").strip()
-                if not name:
-                    continue
-                text.append("    ", style=WHITE)
-                text.append(f"{name:<24}", style=WHITE)
-                if role:
-                    text.append(f" {role}", style=LABEL)
-                text.append("\n", style=WHITE)
-        if officers:
-            text.append("  Officers\n", style=LABEL)
-            for item in officers:
-                name = str((item or {}).get("name") or "").strip()
-                role = str((item or {}).get("role") or "").strip()
-                if not name:
-                    continue
-                text.append("    ", style=WHITE)
-                text.append(f"{name:<24}", style=WHITE)
-                if role:
-                    text.append(f" {role}", style=LABEL)
-                text.append("\n", style=WHITE)
-
-    snapshot = report.get("snapshot") or []
-    visible_snapshot = []
-    for label, value in snapshot:
-        rendered = str(value or "").strip()
-        if not rendered or rendered == "—":
-            continue
-        visible_snapshot.append((label, rendered))
-    if visible_snapshot:
-        text.append("\n  Snapshot\n", style=f"bold {CYAN}")
-        for label, value in visible_snapshot[:8]:
-            text.append(f"  {label:<12}", style=LABEL)
-            text.append(f" {value}\n", style=WHITE)
-
-    for title, items, style in [
-        ("Bull Case", report.get("positives") or [], GAIN_HI),
-        ("Risk Case", report.get("risks") or [], LOSS_HI),
-        ("Monitor", report.get("monitors") or [], YELLOW),
-    ]:
-        if not items:
-            continue
-        text.append(f"\n  {title}\n", style=f"bold {style}")
-        for item in items:
-            wrapped = textwrap.fill(
-                str(item),
-                width=42,
-                initial_indent="  • ",
-                subsequent_indent="    ",
-            )
-            text.append(f"{wrapped}\n", style=WHITE)
-
-    notes = (report.get("latest_notes") or "").strip()
-    if notes:
-        text.append("\n  Latest Notes\n", style=f"bold {PURPLE}")
-        display_notes = notes[:260] + ("..." if len(notes) > 260 else "")
-        _append_wrapped_block(text, display_notes)
-
-    return text
-
-
-def _render_lookup_intelligence(report: dict, symbol: str) -> Text:
-    """Render symbol-scoped intelligence / supply-chain brief."""
-    intel_payload = report.get("intelligence") or {}
-    text = Text()
-
-    def _append_wrapped(target: Text, value: str, *, indent: str = "  ", continuation: str = "  ", width: int = 40, style: str = WHITE) -> None:
-        body = str(value or "").strip()
-        if not body:
-            return
-        wrapped = textwrap.fill(body, width=width, initial_indent=indent, subsequent_indent=continuation)
-        target.append(f"{wrapped}\n", style=style)
-
-    headline = str(intel_payload.get("headline") or "").strip()
-    text.append("  CORPORATE INTELLIGENCE\n", style=f"bold {AMBER}")
-    if headline:
-        _append_wrapped(text, headline, width=38)
-
-    sections = intel_payload.get("sections") or []
-    for section in sections:
-        title = str((section or {}).get("title") or "").strip()
-        rows = (section or {}).get("rows") or []
-        bullets = (section or {}).get("bullets") or []
-        if title:
-            text.append(f"\n  {title}\n", style=f"bold {AMBER}")
-        for label, value in rows:
-            clean_label = str(label).strip()
-            clean_value = str(value).strip()
-            if not clean_value:
-                continue
-            text.append(f"  {clean_label}\n", style=LABEL)
-            _append_wrapped(text, clean_value, indent="    ", continuation="    ", width=36)
-        for item in bullets:
-            _append_wrapped(text, str(item), indent="  • ", continuation="    ", width=38)
-
-    if not headline and not sections:
-        text.append("\n  Pipeline Ready\n", style=f"bold {AMBER}")
-        text.append("  Supply Chain", style=LABEL)
-        text.append("  Planned\n", style=WHITE)
-        text.append("  Threat / Political", style=LABEL)
-        text.append("  Planned\n", style=WHITE)
-        text.append("  News Catalyst", style=LABEL)
-        text.append("  Use the news/OSINT feed as source\n", style=WHITE)
-        text.append("  Next Step", style=LABEL)
-        text.append(f"  Add symbol-scoped risk, supplier, and route signals for {symbol}", style=WHITE)
-
-    return text
-
 # ── Data helpers ──────────────────────────────────────────────────────────────
-
-def _headline_fallback_from_url(url: str) -> str:
-    """Return a readable headline candidate from a URL, or empty string."""
-    clean_url = str(url or "").strip()
-    if not clean_url:
-        return ""
-    try:
-        parsed = urlparse(clean_url)
-    except Exception:
-        return ""
-
-    candidate = unquote((parsed.path or "").rstrip("/").split("/")[-1]).strip()
-    if not candidate:
-        return ""
-
-    candidate = re.sub(r"\.(html?|aspx|php|jsp)$", "", candidate, flags=re.I)
-    candidate = candidate.replace("-", " ").replace("_", " ")
-    candidate = re.sub(r"\s+", " ", candidate).strip()
-    candidate_lower = candidate.lower()
-
-    generic_tokens = {
-        "newsdetail", "newsdetails", "detail", "details", "article",
-        "articles", "news", "story", "stories", "index",
-    }
-    if candidate_lower in generic_tokens or candidate_lower.startswith("newsdetail"):
-        return ""
-    if parsed.query and re.fullmatch(r"[a-z]+detail", candidate_lower):
-        return ""
-    if candidate.isdigit() or len(candidate) <= 5:
-        return ""
-    if not re.search(r"[A-Za-z]", candidate):
-        return ""
-    return candidate.title()
-
 
 def _nst_today_str() -> str:
     """Return today's Nepal trading date as YYYY-MM-DD."""
@@ -1814,10 +1574,6 @@ def _fetch_noc_fuel_prices() -> Optional[dict]:
         return None
 
 
-def _format_compact_npr(value: float) -> str:
-    return f"NPR {value:,.0f}"
-
-
 def _load_intraday_ohlcv(
     symbol: str,
     *,
@@ -1972,146 +1728,8 @@ def _resample_ohlcv(df: pd.DataFrame, timeframe: str) -> pd.DataFrame:
     return agg
 
 
-def _render_candlestick_chart(df: pd.DataFrame, width: int = 120, height: int = 24,
-                               timeframe: str = "D") -> Text:
-    """Render candlestick chart using py-candlestick-chart library.
-
-    Professional quality candles with proper wicks, bodies, and scaling.
-    Supports D/W/M/Y/I timeframes via resampling.
-    Adds date labels on the X-axis below the chart.
-    """
-    from candlestick_chart import Candle, Chart, constants
-
-    if df.empty or len(df) < 2:
-        return Text("  No data for chart", style=LABEL)
-
-    rows = _resample_ohlcv(df, timeframe).sort_values("date").reset_index(drop=True)
-    if rows.empty or len(rows) < 2:
-        return Text("  Insufficient data for chart", style=LABEL)
-
-    # Overall change for title
-    first_close = float(rows.iloc[0]["close"])
-    last_close = float(rows.iloc[-1]["close"])
-    total_chg = (last_close - first_close) / first_close * 100 if first_close else 0
-
-    chart_width = max(width, 40)
-
-    # Build candles
-    candles = []
-    for _, r in rows.iterrows():
-        candles.append(Candle(
-            open=float(r["open"]), high=float(r["high"]),
-            low=float(r["low"]), close=float(r["close"]),
-            volume=float(r.get("volume", 0)),
-        ))
-
-    # Tighten library layout — reduce wasted vertical space
-    constants.MARGIN_TOP = 1    # default 3 → 1 (less empty rows above candles)
-    constants.Y_AXIS_SPACING = 3  # default 4 → 3 (denser price labels)
-
-    # Chart title with timeframe + change
-    tf_labels = {"D": "Daily", "W": "Weekly", "M": "Monthly", "Y": "Yearly", "I": "Intraday"}
-    tf_name = tf_labels.get(timeframe, "Daily")
-    chg_sign = "+" if total_chg >= 0 else ""
-    title = f"{tf_name}  {chg_sign}{total_chg:.2f}%"
-
-    chart = Chart(candles, title=title, width=chart_width, height=max(height, 8))
-
-    # Colors: teal green bull, red bear
-    chart.set_bull_color(38, 166, 154)
-    chart.set_bear_color(239, 83, 80)
-    chart.set_vol_bull_color(38, 166, 154)
-    chart.set_vol_bear_color(239, 83, 80)
-
-    # Disable volume pane — saves vertical space, volume shown in header already
-    chart.set_volume_pane_enabled(False)
-
-    # Clean up info labels
-    chart.set_label("average", "")
-    chart.set_label("volume", "")
-    chart.set_label("currency", "NPR")
-
-    # Render chart to ANSI string
-    ansi_str = chart._render()
-
-    # Strip the library's bottom cruft (scrollbar, date axis, info line)
-    # Keep only lines up to and including the last candle/Y-axis line
-    ansi_lines = ansi_str.split('\n')
-
-    # Find last line that contains Y-axis price labels or candle characters
-    # The library's own date axis and info line come after the candle area
-    # Info line pattern: contains "Price:" or "Highest:" or "Lowest:" or "Var.:"
-    # Library date axis: contains only spaces, digits, dashes, and month names
-    cut_idx = len(ansi_lines)
-    for i in range(len(ansi_lines) - 1, -1, -1):
-        stripped = ansi_lines[i].strip()
-        if not stripped:
-            cut_idx = i
-            continue
-        # Detect library info line (contains Price:/Highest:/Lowest:/Var.)
-        plain = stripped.replace('\x1b', '')  # rough strip of ANSI for detection
-        if any(kw in plain for kw in ['Price:', 'Highest:', 'Lowest:', 'Var.:']):
-            cut_idx = i
-            continue
-        # Detect library date axis (mostly dashes, digits, month abbreviations)
-        # and scrollbar lines (box drawing chars like ─ ┬ └ ┘ █ ░)
-        if all(c in ' ─┬└┘┼│░▓█▒▄▀0123456789-' for c in stripped):
-            cut_idx = i
-            continue
-        break  # hit a real candle/axis line, stop
-
-    candle_lines = '\n'.join(ansi_lines[:cut_idx])
-
-    # Build our own date axis labels
-    y_axis_area = constants.WIDTH
-    margin_r = constants.MARGIN_RIGHT if not constants.Y_AXIS_ON_THE_RIGHT else 0
-    candle_area = chart_width - y_axis_area - margin_r
-    n_visible = min(len(rows), candle_area)
-    visible_rows = rows.tail(n_visible).reset_index(drop=True)
-    if timeframe == "I":
-        labels = [pd.Timestamp(d).strftime("%H:%M") for d in pd.to_datetime(visible_rows["date"])]
-        label_len = 5
-    else:
-        labels = [str(d)[:10] for d in visible_rows["date"]]
-        label_len = 10
-
-    date_axis = Text()
-    if n_visible >= 2:
-        min_gap = label_len + 2
-        max_labels = max(1, candle_area // min_gap)
-        n_labels = min(max_labels, min(8, n_visible))
-
-        if n_labels >= 2:
-            step = max(1, (n_visible - 1) // (n_labels - 1))
-            tick_line = [" "] * (y_axis_area + candle_area)
-            label_positions = []
-            for li in range(n_labels):
-                idx = min(li * step, n_visible - 1)
-                pos = y_axis_area + idx
-                if pos < len(tick_line):
-                    tick_line[pos] = "┬"
-                    label_positions.append((idx, pos))
-            date_axis.append("".join(tick_line[:y_axis_area]), style=DIM)
-            date_axis.append("".join(tick_line[y_axis_area:y_axis_area + candle_area]).replace(" ", "─"), style=DIM)
-            date_axis.append("\n")
-
-            last_end = 0
-            for idx, pos in label_positions:
-                if pos < last_end:
-                    continue
-                gap = pos - last_end
-                if gap > 0:
-                    date_axis.append(" " * gap)
-                date_axis.append(labels[idx], style=LABEL)
-                last_end = pos + label_len
-
-    # Assemble: candle chart + our date axis (no library info line)
-    result = Text.from_ansi(candle_lines)
-    if date_axis.plain.strip():
-        result.append("\n")
-        result.append_text(date_axis)
-
-    return result
+# _render_candlestick_chart resolves the resampler from its own module namespace.
+_charts._resample_ohlcv = _resample_ohlcv
 
 
 def _render_volume_chart(df: pd.DataFrame, width: int = 120, height: int = 6) -> str:
@@ -2138,32 +1756,6 @@ def _render_volume_chart(df: pd.DataFrame, width: int = 120, height: int = 6) ->
     plt.ticks_color("yellow")
     plt.title("Volume")
     return plt.build()
-
-
-def _render_sparkline(values: list[float], width: int = 30) -> Text:
-    """Tiny inline sparkline using Unicode blocks. Green=up, Red=down vs previous bar."""
-    if not values or len(values) < 2:
-        return Text("—", style=LABEL)
-    mn, mx = min(values), max(values)
-    rng = mx - mn if mx != mn else 1
-    blocks = " ▁▂▃▄▅▆▇█"
-    result = Text()
-    step = max(1, len(values) // width)
-    sampled = values[::step][-width:]
-    for i, v in enumerate(sampled):
-        idx = int((v - mn) / rng * 8)
-        if i == 0:
-            color = LABEL
-        elif v > sampled[i - 1]:
-            color = GAIN
-        elif v < sampled[i - 1]:
-            color = LOSS_HI
-        else:
-            color = LABEL
-        result.append(blocks[idx], style=color)
-    return result
-
-
 
 
 def _load_nav_log() -> pd.DataFrame:
