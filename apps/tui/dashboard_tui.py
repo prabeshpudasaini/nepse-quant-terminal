@@ -87,9 +87,12 @@ _silence_tui_noisy_loggers()
 
 
 
-# ── Import data layer from existing dashboard.py ─────────────────────────────
-from apps.classic.dashboard import (
-    MD, _db, _vol, _pct, _npr, load_port, save_port, exec_buy, exec_sell,
+# ── Data layer + theme ────────────────────────────────────────────────────────
+from backend.quant_pro.dashboard_data import (
+    MD, _db, load_port, save_port, exec_buy, exec_sell,
+)
+from apps.tui.theme import (
+    _vol, _pct, _npr,
     AMBER, WHITE, DIM, LABEL, GAIN_HI, GAIN, LOSS_HI, LOSS, CYAN, YELLOW, PURPLE, BLUE,
 )
 from configs.long_term import LONG_TERM_CONFIG

@@ -1272,7 +1272,7 @@ def _load_active_portfolio() -> tuple[list[dict], dict]:
         if isinstance(portfolio_path, Path) and portfolio_path.exists():
             port = pd.read_csv(portfolio_path)
         else:
-            from apps.classic.dashboard import load_port
+            from backend.quant_pro.dashboard_data import load_port
 
             port = load_port()
         if port.empty:
@@ -1762,7 +1762,7 @@ def _gather_context(*, preview_only: bool = False) -> dict:
 
     # 1. Algorithm signals + price data
     try:
-        from apps.classic.dashboard import MD
+        from backend.quant_pro.dashboard_data import MD
         md = MD(top_n=10)
         regime_blocked = False
         if signal_snapshot:
@@ -1770,7 +1770,7 @@ def _gather_context(*, preview_only: bool = False) -> dict:
             regime = str(signal_snapshot.get("regime") or "unknown")
         else:
             from backend.backtesting.simple_backtest import load_all_prices
-            from apps.classic.dashboard import _db
+            from backend.quant_pro.dashboard_data import _db
             from backend.trading.live_trader import generate_signals
 
             conn = _db()
@@ -3044,7 +3044,7 @@ Stock verdicts:
     sym = _extract_symbol_from_question(question)
     if sym:
         try:
-            from apps.classic.dashboard import MD
+            from backend.quant_pro.dashboard_data import MD
             md = MD(top_n=5)
             price = md.ltps().get(sym, 0)
         except Exception:

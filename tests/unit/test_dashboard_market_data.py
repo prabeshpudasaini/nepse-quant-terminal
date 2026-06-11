@@ -1,6 +1,8 @@
 import sqlite3
 
-from apps.classic import dashboard as classic_dashboard
+import pandas as pd
+
+from backend.quant_pro import dashboard_data
 
 
 def test_md_refresh_uses_market_quotes_when_only_latest_session_exists(tmp_path, monkeypatch):
@@ -65,9 +67,9 @@ def test_md_refresh_uses_market_quotes_when_only_latest_session_exists(tmp_path,
     conn.commit()
     conn.close()
 
-    monkeypatch.setattr(classic_dashboard, "_db", lambda: sqlite3.connect(str(db_path)))
+    monkeypatch.setattr(dashboard_data, "_db", lambda: sqlite3.connect(str(db_path)))
 
-    md = classic_dashboard.MD(5)
+    md = dashboard_data.MD(5)
 
     assert md.err is None
     assert md.latest == "2026-04-07"
@@ -131,12 +133,63 @@ def test_md_refresh_dedupes_duplicate_symbol_session_rows(tmp_path, monkeypatch)
     conn.commit()
     conn.close()
 
-    monkeypatch.setattr(classic_dashboard, "_db", lambda: sqlite3.connect(str(db_path)))
+    monkeypatch.setattr(dashboard_data, "_db", lambda: sqlite3.connect(str(db_path)))
 
-    md = classic_dashboard.MD(5)
+    md = dashboard_data.MD(5)
 
     assert md.err is None
     assert list(md.df["symbol"]) == ["AAA", "BBB"]
     assert list(md.gainers["symbol"]) == ["AAA", "BBB"]
     assert list(md.losers["symbol"]) == ["BBB", "AAA"]
     assert list(md.vol_top["symbol"]) == ["BBB", "AAA"]
+
+
+def test_load_port_returns_empty_frame_when_no_file(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        dashboard_data, "PAPER_PORTFOLIO_FILE", tmp_path / "paper_portfolio.csv")
+
+    port = dashboard_data.load_port()
+
+    assert isinstance(port, pd.DataFrame)
+    assert port.empty
+
+
+def test_exec_buy_then_sell_all_round_trips_paper_book(tmp_path, monkeypatch):
+    db_path = tmp_path / "prices.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.execute(
+        """
+        CREATE TABLE stock_prices (
+            symbol TEXT,
+            date TEXT,
+            close REAL
+        )
+        """
+    )
+    conn.execute(
+        "INSERT INTO stock_prices (symbol, date, close) VALUES (?, ?, ?)",
+        ("AAA", "2026-04-07", 100.0),
+    )
+    conn.commit()
+    conn.close()
+
+    monkeypatch.setattr(
+        dashboard_data, "PAPER_PORTFOLIO_FILE", tmp_path / "paper_portfolio.csv")
+    monkeypatch.setattr(dashboard_data, "_db", lambda: sqlite3.connect(str(db_path)))
+
+    res = dashboard_data.exec_buy("AAA", "10", "")
+    assert res.startswith("BUY  10xAAA @ 100.0")
+
+    port = dashboard_data.load_port()
+    assert len(port) == 1
+    row = port.iloc[0]
+    assert row["Symbol"] == "AAA"
+    assert int(row["Quantity"]) == 10
+    assert float(row["Buy_Price"]) == 100.0
+    # fees = amt * 0.004 = 1000 * 0.004 = 4.0; cost = amt + fees = 1004.0
+    assert float(row["Buy_Fees"]) == 4.0
+    assert float(row["Total_Cost_Basis"]) == 1004.0
+
+    res = dashboard_data.exec_sell("AAA", "all", "")
+    assert res.startswith("SELL  10xAAA @ 100.0")
+    assert dashboard_data.load_port().empty
