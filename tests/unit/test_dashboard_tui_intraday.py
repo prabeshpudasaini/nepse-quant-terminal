@@ -3,6 +3,7 @@ import sqlite3
 from apps.tui import dashboard_tui
 from apps.tui.io import intraday as intraday_io
 from apps.tui.io import stats as stats_io
+from apps.tui.state.mixins import order_book as order_book_mixin
 import pandas as pd
 from rich.text import Text
 
@@ -149,7 +150,7 @@ def test_submit_paper_order_rejects_same_day_buy_after_sell(monkeypatch):
     app._save_paper_orders = lambda: None
     app._populate_orders_tab = lambda: None
 
-    monkeypatch.setattr(dashboard_tui, "load_port", lambda: pd.DataFrame())
+    monkeypatch.setattr(order_book_mixin, "load_port", lambda: pd.DataFrame())
     monkeypatch.setattr("backend.trading.live_trader.now_nst", lambda: dashboard_tui.datetime(2026, 4, 9, 10, 0, 0))
 
     msg = dashboard_tui.NepseDashboard._submit_paper_order(app, "BUY", "AAA", 100, 100.0, 2.0)
@@ -175,7 +176,7 @@ def test_submit_paper_order_rejects_same_day_sell_after_buy(monkeypatch):
     app._populate_orders_tab = lambda: None
 
     monkeypatch.setattr(
-        dashboard_tui,
+        order_book_mixin,
         "load_port",
         lambda: pd.DataFrame(
             [
@@ -239,7 +240,7 @@ def test_match_paper_orders_sets_status_when_same_day_rule_cancels(monkeypatch):
     app._populate_trades_full = lambda: None
 
     events = []
-    monkeypatch.setattr(dashboard_tui, "load_port", lambda: pd.DataFrame([{"Symbol": "AAA", "Entry_Date": "2026-04-09"}]))
+    monkeypatch.setattr(order_book_mixin, "load_port", lambda: pd.DataFrame([{"Symbol": "AAA", "Entry_Date": "2026-04-09"}]))
     monkeypatch.setattr("backend.trading.live_trader.now_nst", lambda: dashboard_tui.datetime(2026, 4, 9, 10, 1, 0))
 
     dashboard_tui.NepseDashboard._match_paper_orders(app)
