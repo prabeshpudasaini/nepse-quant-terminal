@@ -491,6 +491,16 @@ from apps.tui.screens.command_palette import CommandPalette  # re-export
 from apps.tui.screens.watchlist_add import WatchlistAddScreen  # re-export
 from apps.tui.screens.lookup import LookupScreen  # re-export
 
+from apps.tui.state.mixins.lifecycle import LifecycleMixin  # re-export
+from apps.tui.state.mixins.header_status import HeaderStatusMixin  # re-export
+from apps.tui.state.mixins.trading_engine import TradingEngineMixin  # re-export
+from apps.tui.state.mixins.order_book import OrderBookMixin  # re-export
+from apps.tui.state.mixins.tab_refresh import TabRefreshMixin  # re-export
+from apps.tui.state.mixins.agent_chat import AgentChatMixin  # re-export
+from apps.tui.state.mixins.accounts_strategies import AccountsStrategiesMixin  # re-export
+from apps.tui.state.mixins.events_actions import EventsActionsMixin  # re-export
+from apps.tui.state.mixins.live_tms import LiveTMSMixin  # re-export
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # MAIN APP
@@ -516,7 +526,18 @@ TAB_LABELS = {
 }
 
 
-class NepseDashboard(App):
+class NepseDashboard(
+    LifecycleMixin,
+    HeaderStatusMixin,
+    TradingEngineMixin,
+    OrderBookMixin,
+    TabRefreshMixin,
+    AgentChatMixin,
+    AccountsStrategiesMixin,
+    EventsActionsMixin,
+    LiveTMSMixin,
+    App,
+):
     CSS_PATH = Path(__file__).with_name("dashboard_tui.tcss")
 
     BINDINGS = [
