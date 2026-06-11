@@ -1,6 +1,7 @@
 import sqlite3
 
 from apps.tui import dashboard_tui
+from apps.tui.io import stats as stats_io
 import pandas as pd
 from rich.text import Text
 
@@ -370,7 +371,7 @@ def test_compute_portfolio_stats_includes_daily_change(monkeypatch):
             return {"SHIVM": 654.0}
 
     monkeypatch.setattr(
-        dashboard_tui,
+        stats_io,
         "load_port",
         lambda: pd.DataFrame(
             [
@@ -385,9 +386,9 @@ def test_compute_portfolio_stats_includes_daily_change(monkeypatch):
             ]
         ),
     )
-    monkeypatch.setattr(dashboard_tui, "_load_nav_log", lambda: pd.DataFrame())
-    monkeypatch.setattr(dashboard_tui, "_load_trade_log", lambda: pd.DataFrame())
-    monkeypatch.setattr(dashboard_tui, "_load_manual_paper_cash", lambda total_cost, nav_log=None: 857364.0)
+    monkeypatch.setattr(stats_io, "_load_nav_log", lambda: pd.DataFrame())
+    monkeypatch.setattr(stats_io, "_load_trade_log", lambda: pd.DataFrame())
+    monkeypatch.setattr(stats_io, "_load_manual_paper_cash", lambda total_cost, nav_log=None: 857364.0)
 
     stats = dashboard_tui._compute_portfolio_stats(FakeMD())
 
@@ -419,7 +420,7 @@ def test_compute_portfolio_stats_exposes_gross_return_above_net_when_fees_paid(m
             return {"SHIVM": 654.0}
 
     monkeypatch.setattr(
-        dashboard_tui,
+        stats_io,
         "load_port",
         lambda: pd.DataFrame(
             [
@@ -435,9 +436,9 @@ def test_compute_portfolio_stats_exposes_gross_return_above_net_when_fees_paid(m
             ]
         ),
     )
-    monkeypatch.setattr(dashboard_tui, "_load_nav_log", lambda: pd.DataFrame())
+    monkeypatch.setattr(stats_io, "_load_nav_log", lambda: pd.DataFrame())
     monkeypatch.setattr(
-        dashboard_tui,
+        stats_io,
         "_load_trade_log",
         lambda: pd.DataFrame(
             [
@@ -445,7 +446,7 @@ def test_compute_portfolio_stats_exposes_gross_return_above_net_when_fees_paid(m
             ]
         ),
     )
-    monkeypatch.setattr(dashboard_tui, "_load_manual_paper_cash", lambda total_cost, nav_log=None: 857364.0)
+    monkeypatch.setattr(stats_io, "_load_manual_paper_cash", lambda total_cost, nav_log=None: 857364.0)
 
     stats = dashboard_tui._compute_portfolio_stats(FakeMD())
 
