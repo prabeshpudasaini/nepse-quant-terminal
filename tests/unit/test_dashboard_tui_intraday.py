@@ -5,6 +5,7 @@ from apps.tui.io import intraday as intraday_io
 from apps.tui.io import stats as stats_io
 from apps.tui.state.mixins import agent_chat as agent_chat_mixin
 from apps.tui.state.mixins import order_book as order_book_mixin
+from apps.tui.state.mixins import tab_refresh as tab_refresh_mixin
 import pandas as pd
 from rich.text import Text
 
@@ -313,7 +314,7 @@ def test_populate_trades_full_scales_fractional_pnl_pct_to_percent(monkeypatch):
     app.query_one = query_one
 
     monkeypatch.setattr(
-        dashboard_tui,
+        tab_refresh_mixin,
         "_load_trade_log",
         lambda: pd.DataFrame(
             [
