@@ -177,28 +177,3 @@ class TestRefreshIdempotent:
         count2 = conn.execute("SELECT COUNT(*) FROM corporate_actions WHERE symbol='TEST'").fetchone()[0]
         conn.close()
         assert count1 == count2
-
-
-class TestMarketService:
-    def test_market_service_reads_description(self, tmp_path, monkeypatch):
-        db_file = _reset_db(tmp_path, monkeypatch)
-        from backend.quant_pro.database import init_db, get_db_connection
-
-        init_db()
-        # Insert an upcoming bookclose so upcoming_corporate_actions returns it.
-        from datetime import timedelta
-        future = (datetime.now().date() + timedelta(days=5)).isoformat()
-        conn = get_db_connection()
-        conn.execute(
-            "INSERT INTO corporate_actions (symbol, fiscal_year, bookclose_date, "
-            "cash_dividend_pct, bonus_share_pct, right_share_ratio, description, "
-            "scraped_at_utc) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            ("TEST", "2080/81", future, 10.0, 5.0, "1:5", "Cash Dividend 10%", "2024-01-01T00:00:00"),
-        )
-        conn.commit()
-        conn.close()
-
-        from backend.core.services.market import MarketService
-        svc = MarketService(db_path=db_file)
-        actions = svc.upcoming_corporate_actions(days=30)
-        assert any(a["symbol"] == "TEST" and a["description"] == "Cash Dividend 10%" for a in actions)

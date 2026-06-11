@@ -457,7 +457,7 @@ def main():
                 generate_low_volatility_signals_at_date,
                 generate_mean_reversion_signals_at_date,
             )
-            from apps.classic.dashboard import MD, _db
+            from backend.quant_pro.dashboard_data import MD, _db
             md = MD(top_n=10)
             conn = _db()
             prices_df = load_all_prices(conn)
@@ -473,7 +473,7 @@ def main():
             symbols = [s for s in dict.fromkeys(s.symbol for s in sigs)
                        if s.isalpha()][:20]
             # Also include portfolio holdings
-            from apps.classic.dashboard import load_port
+            from backend.quant_pro.dashboard_data import load_port
             port = load_port()
             if not port.empty:
                 for sym in port["Symbol"].unique():

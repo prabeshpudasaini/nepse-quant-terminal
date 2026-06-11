@@ -1,6 +1,11 @@
 import sqlite3
 
 from apps.tui import dashboard_tui
+from apps.tui.io import intraday as intraday_io
+from apps.tui.io import stats as stats_io
+from apps.tui.state.mixins import agent_chat as agent_chat_mixin
+from apps.tui.state.mixins import order_book as order_book_mixin
+from apps.tui.state.mixins import tab_refresh as tab_refresh_mixin
 import pandas as pd
 from rich.text import Text
 
@@ -49,7 +54,7 @@ def test_load_intraday_ohlcv_builds_session_bars(tmp_path, monkeypatch):
             (3, "NABIL", None, None, 103.0, 103.0, None, None, 160.0, "test", "2026-04-06T04:21:00+00:00"),
         ],
     )
-    monkeypatch.setattr(dashboard_tui, "_db", lambda: sqlite3.connect(str(db_path)))
+    monkeypatch.setattr(intraday_io, "_db", lambda: sqlite3.connect(str(db_path)))
 
     bars, session_date, snapshot_count = dashboard_tui._load_intraday_ohlcv(
         "NABIL",
@@ -79,7 +84,7 @@ def test_load_intraday_ohlcv_falls_back_to_latest_available_session(tmp_path, mo
             (2, "NABIL", None, None, 101.0, 101.0, None, None, 80.0, "test", "2026-04-05T04:20:00+00:00"),
         ],
     )
-    monkeypatch.setattr(dashboard_tui, "_db", lambda: sqlite3.connect(str(db_path)))
+    monkeypatch.setattr(intraday_io, "_db", lambda: sqlite3.connect(str(db_path)))
 
     bars, session_date, snapshot_count = dashboard_tui._load_intraday_ohlcv(
         "NABIL",
@@ -147,7 +152,7 @@ def test_submit_paper_order_rejects_same_day_buy_after_sell(monkeypatch):
     app._save_paper_orders = lambda: None
     app._populate_orders_tab = lambda: None
 
-    monkeypatch.setattr(dashboard_tui, "load_port", lambda: pd.DataFrame())
+    monkeypatch.setattr(order_book_mixin, "load_port", lambda: pd.DataFrame())
     monkeypatch.setattr("backend.trading.live_trader.now_nst", lambda: dashboard_tui.datetime(2026, 4, 9, 10, 0, 0))
 
     msg = dashboard_tui.NepseDashboard._submit_paper_order(app, "BUY", "AAA", 100, 100.0, 2.0)
@@ -173,7 +178,7 @@ def test_submit_paper_order_rejects_same_day_sell_after_buy(monkeypatch):
     app._populate_orders_tab = lambda: None
 
     monkeypatch.setattr(
-        dashboard_tui,
+        order_book_mixin,
         "load_port",
         lambda: pd.DataFrame(
             [
@@ -237,7 +242,7 @@ def test_match_paper_orders_sets_status_when_same_day_rule_cancels(monkeypatch):
     app._populate_trades_full = lambda: None
 
     events = []
-    monkeypatch.setattr(dashboard_tui, "load_port", lambda: pd.DataFrame([{"Symbol": "AAA", "Entry_Date": "2026-04-09"}]))
+    monkeypatch.setattr(order_book_mixin, "load_port", lambda: pd.DataFrame([{"Symbol": "AAA", "Entry_Date": "2026-04-09"}]))
     monkeypatch.setattr("backend.trading.live_trader.now_nst", lambda: dashboard_tui.datetime(2026, 4, 9, 10, 1, 0))
 
     dashboard_tui.NepseDashboard._match_paper_orders(app)
@@ -309,7 +314,7 @@ def test_populate_trades_full_scales_fractional_pnl_pct_to_percent(monkeypatch):
     app.query_one = query_one
 
     monkeypatch.setattr(
-        dashboard_tui,
+        tab_refresh_mixin,
         "_load_trade_log",
         lambda: pd.DataFrame(
             [
@@ -370,7 +375,7 @@ def test_compute_portfolio_stats_includes_daily_change(monkeypatch):
             return {"SHIVM": 654.0}
 
     monkeypatch.setattr(
-        dashboard_tui,
+        stats_io,
         "load_port",
         lambda: pd.DataFrame(
             [
@@ -385,9 +390,9 @@ def test_compute_portfolio_stats_includes_daily_change(monkeypatch):
             ]
         ),
     )
-    monkeypatch.setattr(dashboard_tui, "_load_nav_log", lambda: pd.DataFrame())
-    monkeypatch.setattr(dashboard_tui, "_load_trade_log", lambda: pd.DataFrame())
-    monkeypatch.setattr(dashboard_tui, "_load_manual_paper_cash", lambda total_cost, nav_log=None: 857364.0)
+    monkeypatch.setattr(stats_io, "_load_nav_log", lambda: pd.DataFrame())
+    monkeypatch.setattr(stats_io, "_load_trade_log", lambda: pd.DataFrame())
+    monkeypatch.setattr(stats_io, "_load_manual_paper_cash", lambda total_cost, nav_log=None: 857364.0)
 
     stats = dashboard_tui._compute_portfolio_stats(FakeMD())
 
@@ -419,7 +424,7 @@ def test_compute_portfolio_stats_exposes_gross_return_above_net_when_fees_paid(m
             return {"SHIVM": 654.0}
 
     monkeypatch.setattr(
-        dashboard_tui,
+        stats_io,
         "load_port",
         lambda: pd.DataFrame(
             [
@@ -435,9 +440,9 @@ def test_compute_portfolio_stats_exposes_gross_return_above_net_when_fees_paid(m
             ]
         ),
     )
-    monkeypatch.setattr(dashboard_tui, "_load_nav_log", lambda: pd.DataFrame())
+    monkeypatch.setattr(stats_io, "_load_nav_log", lambda: pd.DataFrame())
     monkeypatch.setattr(
-        dashboard_tui,
+        stats_io,
         "_load_trade_log",
         lambda: pd.DataFrame(
             [
@@ -445,7 +450,7 @@ def test_compute_portfolio_stats_exposes_gross_return_above_net_when_fees_paid(m
             ]
         ),
     )
-    monkeypatch.setattr(dashboard_tui, "_load_manual_paper_cash", lambda total_cost, nav_log=None: 857364.0)
+    monkeypatch.setattr(stats_io, "_load_manual_paper_cash", lambda total_cost, nav_log=None: 857364.0)
 
     stats = dashboard_tui._compute_portfolio_stats(FakeMD())
 
@@ -554,12 +559,12 @@ def test_load_agent_runtime_state_clears_mismatched_account_analysis(monkeypatch
     app._agent_visible_since = 0.0
 
     monkeypatch.setattr(
-        dashboard_tui,
+        agent_chat_mixin,
         "load_agent_analysis",
         lambda: {"stocks": [{"symbol": "NABIL"}], "account_id": "account_2"},
     )
-    monkeypatch.setattr(dashboard_tui, "load_agent_history", lambda *args, **kwargs: [])
-    monkeypatch.setattr(dashboard_tui, "load_agent_archive_history", lambda *args, **kwargs: [])
+    monkeypatch.setattr(agent_chat_mixin, "load_agent_history", lambda *args, **kwargs: [])
+    monkeypatch.setattr(agent_chat_mixin, "load_agent_archive_history", lambda *args, **kwargs: [])
 
     dashboard_tui.NepseDashboard._load_agent_runtime_state(app)
 
@@ -611,7 +616,7 @@ def test_ensure_lookup_history_backfills_sparse_daily_history(tmp_path, monkeypa
     conn.commit()
     conn.close()
 
-    monkeypatch.setattr(dashboard_tui, "_db", lambda: sqlite3.connect(str(db_path)))
+    monkeypatch.setattr(intraday_io, "_db", lambda: sqlite3.connect(str(db_path)))
     monkeypatch.setenv("NEPSE_DB_FILE", str(db_path))
     monkeypatch.setattr(
         "backend.quant_pro.vendor_api.fetch_ohlcv_chunk",

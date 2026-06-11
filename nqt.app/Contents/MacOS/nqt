@@ -1,0 +1,33 @@
+#!/bin/sh
+# NQT launcher — opens the NEPSE Quant Terminal TUI in a new Terminal window.
+# Works whether this .app lives inside the repo or anywhere else (Desktop,
+# /Applications, …): it tries its own location first, then a known repo path.
+set -u
+
+MACOS_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+SELF_REPO=$(CDPATH= cd -- "$MACOS_DIR/../../.." 2>/dev/null && pwd)
+KNOWN_REPO="$HOME/LocalProjects/nepse-quant-terminal"
+
+REPO_ROOT=""
+for cand in "$SELF_REPO" "$KNOWN_REPO"; do
+    if [ -n "$cand" ] && [ -f "$cand/Launch Quant Terminal.command" ]; then
+        REPO_ROOT="$cand"
+        break
+    fi
+done
+
+if [ -z "$REPO_ROOT" ]; then
+    osascript -e 'display dialog "Could not find the nepse-quant-terminal repo. Keep nqt.app inside the repo folder, or clone it to ~/LocalProjects/nepse-quant-terminal, then open again." buttons {"OK"} default button "OK" with title "NQT"'
+    exit 1
+fi
+
+# Escape the path for safe embedding in the AppleScript string.
+escaped_repo=$(printf '%s' "$REPO_ROOT" | sed 's/\\/\\\\/g; s/"/\\"/g')
+
+osascript <<APPLESCRIPT
+set repoPath to "$escaped_repo"
+tell application "Terminal"
+    activate
+    do script "cd " & quoted form of repoPath & " && sh " & quoted form of (repoPath & "/Launch Quant Terminal.command")
+end tell
+APPLESCRIPT
