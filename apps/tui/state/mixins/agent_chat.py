@@ -717,6 +717,8 @@ class AgentChatMixin:
         return None
 
     def _maybe_submit_agent_super_signal(self, analysis: dict) -> None:
+        from backend.quant_pro.control_plane.command_service import build_tui_control_plane
+
         spec = self._build_agent_auto_order_spec(analysis or {})
         if not spec:
             return

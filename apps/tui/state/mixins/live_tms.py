@@ -4,10 +4,10 @@ Live trading is a stub in the public build, but the watchlist-sync workers are
 real. The 3 @work watchlist workers and their single call_from_thread reader
 (_set_watchlist_from_tms_snapshot) live together here as the co-location anchor.
 
-NOTE (NameError seam, fixed in step 11): _watchlist_add_live/_watchlist_remove_live/
-_refresh_watchlist_live reference build_tui_control_plane and _set_watchlist_from_tms_snapshot
-references save_tms_snapshot — neither is imported yet; the lazy in-function import lands
-in the build_tui_control_plane fix step. These paths are inert in the unit suite.
+build_tui_control_plane and save_tms_snapshot are imported lazily inside the
+method bodies that need them (never at module top) to avoid a partial-init
+circular-import trap through command_service. These paths are inert in the unit
+suite.
 """
 
 import time
@@ -50,6 +50,8 @@ class LiveTMSMixin:
         bundle["watchlist"] = snapshot
         self._tms_bundle = bundle
         try:
+            from backend.quant_pro.tms_audit import save_tms_snapshot
+
             save_tms_snapshot("tms_watchlist", dict(snapshot), status="ok")
         except Exception:
             pass
@@ -57,6 +59,8 @@ class LiveTMSMixin:
 
     @work(thread=True)
     def _watchlist_add_live(self, sym: str) -> None:
+        from backend.quant_pro.control_plane.command_service import build_tui_control_plane
+
         self.app.call_from_thread(self._set_status, f"TMS monitor  |  Adding {sym} to broker watchlist...")
         try:
             result = build_tui_control_plane(self).sync_watchlist(action="add", symbol=sym)
@@ -69,6 +73,8 @@ class LiveTMSMixin:
 
     @work(thread=True)
     def _watchlist_remove_live(self, sym: str) -> None:
+        from backend.quant_pro.control_plane.command_service import build_tui_control_plane
+
         self.app.call_from_thread(self._set_status, f"TMS monitor  |  Removing {sym} from broker watchlist...")
         try:
             result = build_tui_control_plane(self).sync_watchlist(action="remove", symbol=sym)
@@ -90,6 +96,8 @@ class LiveTMSMixin:
             return
         self._tms_watchlist_refresh_inflight = True
         try:
+            from backend.quant_pro.control_plane.command_service import build_tui_control_plane
+
             self.app.call_from_thread(self._set_status, "TMS monitor  |  Syncing broker watchlist...")
             result = build_tui_control_plane(self).sync_watchlist(action="fetch")
             snapshot = dict(result.payload or {})

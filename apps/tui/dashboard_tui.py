@@ -17,13 +17,11 @@ import shlex
 import subprocess
 import sys
 import time
-import unicodedata
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-import pandas as pd
 import requests as _requests
 from rich.markup import escape as _escape_markup
 from rich.text import Text
@@ -254,10 +252,6 @@ _TMS_AUDIT_SNAPSHOT_MAP = {
 }
 
 
-def _display_live_override_enabled() -> bool:
-    return False
-
-
 # ── Ticker scroll speed ─────────────────────────────────────────────────────
 TICKER_SPEED = 0.15  # seconds between scroll steps
 
@@ -266,82 +260,6 @@ TICKER_SPEED = 0.15  # seconds between scroll steps
 # public build — set NEPSE_OSINT_BASE to your own endpoint to enable it.
 OSINT_BASE = os.environ.get("NEPSE_OSINT_BASE", "").rstrip("/")
 OSINT_TIMEOUT = 8
-
-# ── Unicode display-width helpers (Devanagari-aware) ─────────────────────────
-
-def _disp_width(text: str) -> int:
-    """Visual column width matching the patched Rich cell_len.
-
-    Mn (non-spacing marks like virama) = 0 cells.
-    Mc (spacing combining marks like ा ि ो) = 1 cell (macOS terminals).
-    """
-    return sum(
-        0 if unicodedata.category(c) in ('Mn', 'Me', 'Cf') else 1
-        for c in text
-    )
-
-
-def _truncate_display(text: str, max_cols: int, suffix: str = "…") -> str:
-    """Truncate to max_cols display columns without splitting combining sequences."""
-    text = unicodedata.normalize('NFC', text)
-    w = 0
-    suffix_w = len(suffix)
-    for i, c in enumerate(text):
-        cw = 0 if unicodedata.category(c) in ('Mn', 'Me', 'Cf') else 1
-        if w + cw > max_cols - suffix_w:
-            return text[:i] + suffix
-        w += cw
-    return text
-
-
-def _wrap_display(text: str, width: int) -> list[str]:
-    """Word-wrap by display column width (handles Devanagari combining chars)."""
-    text = unicodedata.normalize('NFC', text)
-    result: list[str] = []
-    for para in text.splitlines():
-        para = para.strip()
-        if not para:
-            if result and result[-1]:
-                result.append('')
-            continue
-        words = para.split(' ')
-        line = ''
-        line_w = 0
-        for word in words:
-            word_w = _disp_width(word)
-            if line_w == 0:
-                line, line_w = word, word_w
-            elif line_w + 1 + word_w <= width:
-                line += ' ' + word
-                line_w += 1 + word_w
-            else:
-                if line:
-                    result.append(line)
-                line, line_w = word, word_w
-        if line:
-            result.append(line)
-    return result
-
-def _news_display_summary(story: dict) -> str:
-    """Return the best summary — prefer English, fall back to Nepali."""
-    summary = str(story.get("summary") or "").strip()
-    if summary and not _contains_non_ascii(summary):
-        return summary
-    translated_summary = str(story.get("_translated_summary") or "").strip()
-    if translated_summary:
-        return translated_summary
-    translated = str(story.get("_translated") or "").strip()
-    if translated:
-        return translated
-    url = str(story.get("url") or "").strip()
-    if url:
-        slug = _headline_fallback_from_url(url)
-        if slug:
-            return slug
-    if summary:
-        return summary
-    return "No summary available."
-
 
 def _fetch_osint_stories(limit: int = 40) -> list[dict]:
     """Fetch latest stories from Nepal OSINT API (disabled unless configured)."""
@@ -366,88 +284,8 @@ def _fetch_osint_brief() -> dict:
     except Exception:
         return {}
 
-# ── Data helpers ──────────────────────────────────────────────────────────────
-
-def _fetch_usd_npr_rate() -> Optional[dict]:
-    """Fetch latest USD/NPR rates from NRB."""
-    api_url = "https://www.nrb.org.np/api/forex/v1/rates"
-    try:
-        today = datetime.utcnow().date()
-        from_date = today - timedelta(days=7)
-        response = _requests.get(
-            api_url,
-            params={
-                "from": from_date.strftime("%Y-%m-%d"),
-                "to": today.strftime("%Y-%m-%d"),
-                "per_page": 50,
-                "page": 1,
-            },
-            headers={
-                "Accept": "application/json",
-                "User-Agent": "Nepse-TUI/1.0",
-            },
-            timeout=20,
-        )
-        response.raise_for_status()
-        data = response.json()
-        if data.get("status", {}).get("code") != 200:
-            return None
-
-        latest_match = None
-        for rate_data in data.get("data", {}).get("payload", []):
-            date_str = rate_data.get("date")
-            try:
-                rate_date = datetime.fromisoformat(str(date_str).replace("Z", "+00:00"))
-            except Exception:
-                rate_date = datetime.utcnow()
-            for rate in rate_data.get("rates", []):
-                currency = rate.get("currency", {})
-                if currency.get("iso3") != "USD":
-                    continue
-                candidate = {
-                    "currency_code": "USD",
-                    "currency_name": currency.get("name", "US Dollar"),
-                    "buy_rate": float(rate.get("buy", 0) or 0),
-                    "sell_rate": float(rate.get("sell", 0) or 0),
-                    "unit": int(currency.get("unit", 1) or 1),
-                    "date": rate_date,
-                    "source": "NRB",
-                }
-                if latest_match is None or candidate["date"] > latest_match["date"]:
-                    latest_match = candidate
-        return latest_match
-    except Exception:
-        return None
-
-
 # _render_candlestick_chart resolves the resampler from its own module namespace.
 _charts._resample_ohlcv = _resample_ohlcv
-
-
-def _render_volume_chart(df: pd.DataFrame, width: int = 120, height: int = 6) -> str:
-    """Render volume bar chart using plotext. Returns ANSI string."""
-    import plotext as plt
-    if df.empty:
-        return ""
-
-    rows = df.sort_values("date").reset_index(drop=True)
-    dates = [str(d)[:10] for d in rows["date"]]
-    vols = rows["volume"].tolist()
-    colors = [
-        "green" if float(rows.iloc[i]["close"]) >= float(rows.iloc[i]["open"]) else "red"
-        for i in range(len(rows))
-    ]
-
-    plt.clear_figure()
-    plt.date_form("Y-m-d")
-    plt.bar(dates, vols, color=colors, width=0.8)
-    plt.plotsize(max(width, 40), max(height, 4))
-    plt.theme("dark")
-    plt.canvas_color("black")
-    plt.axes_color("black")
-    plt.ticks_color("yellow")
-    plt.title("Volume")
-    return plt.build()
 
 
 # Bind the persistence helpers onto the stats module so its moved compute
