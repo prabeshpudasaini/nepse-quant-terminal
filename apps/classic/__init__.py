@@ -1,1 +1,0 @@
-"""Classic terminal dashboard package."""
