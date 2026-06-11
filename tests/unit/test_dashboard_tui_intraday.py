@@ -3,6 +3,7 @@ import sqlite3
 from apps.tui import dashboard_tui
 from apps.tui.io import intraday as intraday_io
 from apps.tui.io import stats as stats_io
+from apps.tui.state.mixins import agent_chat as agent_chat_mixin
 from apps.tui.state.mixins import order_book as order_book_mixin
 import pandas as pd
 from rich.text import Text
@@ -557,12 +558,12 @@ def test_load_agent_runtime_state_clears_mismatched_account_analysis(monkeypatch
     app._agent_visible_since = 0.0
 
     monkeypatch.setattr(
-        dashboard_tui,
+        agent_chat_mixin,
         "load_agent_analysis",
         lambda: {"stocks": [{"symbol": "NABIL"}], "account_id": "account_2"},
     )
-    monkeypatch.setattr(dashboard_tui, "load_agent_history", lambda *args, **kwargs: [])
-    monkeypatch.setattr(dashboard_tui, "load_agent_archive_history", lambda *args, **kwargs: [])
+    monkeypatch.setattr(agent_chat_mixin, "load_agent_history", lambda *args, **kwargs: [])
+    monkeypatch.setattr(agent_chat_mixin, "load_agent_archive_history", lambda *args, **kwargs: [])
 
     dashboard_tui.NepseDashboard._load_agent_runtime_state(app)
 
