@@ -1,6 +1,7 @@
 import sqlite3
 
 from apps.tui import dashboard_tui
+from apps.tui.io import intraday as intraday_io
 from apps.tui.io import stats as stats_io
 import pandas as pd
 from rich.text import Text
@@ -50,7 +51,7 @@ def test_load_intraday_ohlcv_builds_session_bars(tmp_path, monkeypatch):
             (3, "NABIL", None, None, 103.0, 103.0, None, None, 160.0, "test", "2026-04-06T04:21:00+00:00"),
         ],
     )
-    monkeypatch.setattr(dashboard_tui, "_db", lambda: sqlite3.connect(str(db_path)))
+    monkeypatch.setattr(intraday_io, "_db", lambda: sqlite3.connect(str(db_path)))
 
     bars, session_date, snapshot_count = dashboard_tui._load_intraday_ohlcv(
         "NABIL",
@@ -80,7 +81,7 @@ def test_load_intraday_ohlcv_falls_back_to_latest_available_session(tmp_path, mo
             (2, "NABIL", None, None, 101.0, 101.0, None, None, 80.0, "test", "2026-04-05T04:20:00+00:00"),
         ],
     )
-    monkeypatch.setattr(dashboard_tui, "_db", lambda: sqlite3.connect(str(db_path)))
+    monkeypatch.setattr(intraday_io, "_db", lambda: sqlite3.connect(str(db_path)))
 
     bars, session_date, snapshot_count = dashboard_tui._load_intraday_ohlcv(
         "NABIL",
@@ -612,7 +613,7 @@ def test_ensure_lookup_history_backfills_sparse_daily_history(tmp_path, monkeypa
     conn.commit()
     conn.close()
 
-    monkeypatch.setattr(dashboard_tui, "_db", lambda: sqlite3.connect(str(db_path)))
+    monkeypatch.setattr(intraday_io, "_db", lambda: sqlite3.connect(str(db_path)))
     monkeypatch.setenv("NEPSE_DB_FILE", str(db_path))
     monkeypatch.setattr(
         "backend.quant_pro.vendor_api.fetch_ohlcv_chunk",
